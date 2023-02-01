@@ -6322,10 +6322,6 @@ class SimUpdater {
 // Connection Manager configuration constants:
 // Maximum time allowed for the imp to connect to the server before timing out, in seconds
 const APP_CM_CONNECT_TIMEOUT = 180.0;
-// Delay before automatic disconnection if there are no connection consumers, in seconds
-const APP_CM_AUTO_DISC_DELAY = 10.0;
-// Maximum time allowed for the imp to be connected to the server, in seconds
-const APP_CM_MAX_CONNECTED_TIME = 180.0;
 
 // Replay Messenger configuration constants:
 // The maximum message send rate,
@@ -6413,8 +6409,7 @@ class Application {
             "blinkupBehavior"    : CM_BLINK_ON_CONNECT,
             "errorPolicy"        : RETURN_ON_ERROR_NO_DISCONNECT,
             "connectTimeout"     : APP_CM_CONNECT_TIMEOUT,
-            "autoDisconnectDelay": APP_CM_AUTO_DISC_DELAY,
-            "maxConnectedTime"   : APP_CM_MAX_CONNECTED_TIME
+            "stayConnected"      : true
         };
         cm = CustomConnectionManager(cmConfig);
         cm.connect();
