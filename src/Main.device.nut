@@ -38,7 +38,7 @@
 
 
 // Application Version
-const APP_VERSION = "3.1.2";
+const APP_VERSION = "3.1.2-custom";
 
 
 // Constants common for the imp-agent and the imp-device
@@ -718,12 +718,6 @@ HW_ESP_UART <- hardware.uartABCD;
 // ESP32 power enable pin (flip-flop)
 HW_ESP_POWER_EN_PIN <- FlipFlop(hardware.pinYD, hardware.pinS);
 
-// Light Dependent Photoresistor pin
-HW_LDR_PIN <- hardware.pinV;
-
-// Light Dependent Photoresistor power enable pin
-HW_LDR_POWER_EN_PIN <- FlipFlop(hardware.pinYD, hardware.pinXM);
-
 // Battery level measurement pin
 HW_BAT_LEVEL_PIN <- hardware.pinXD;
 
@@ -866,22 +860,18 @@ const PMGR_SEND_TIMEOUT = 3;
 
 // Implements useful in production features:
 // - Emergency mode (If an unhandled error occurred, device goes to sleep and periodically connects to the server waiting for a SW update)
-// - Shipping mode (When released from the factory, the device sleeps until it is woken up by the end-user)
 class ProductionManager {
     _debugOn = false;
     _startApp = null;
-    _shippingMode = false;
     _isNewDeployment = false;
 
     /**
      * Constructor for Production Manager
      *
      * @param {function} startAppFunc - The function to be called to start the main application
-     * @param {boolean} [shippingMode = false] - Enable shipping mode
      */
-    constructor(startAppFunc, shippingMode = false) {
+    constructor(startAppFunc) {
         _startApp = @() imp.wakeup(0, startAppFunc);
-        _shippingMode = shippingMode;
     }
 
     /**
@@ -889,9 +879,6 @@ class ProductionManager {
      * This method must be called first
      */
     function start() {
-        // Maximum sleep time (sec) used for shipping mode
-        const PMGR_MAX_SLEEP_TIME = 2419198;
-
         // NOTE: The app may override this handler but it must call enterEmergencyMode in case of a runtime error
         imp.onunhandledexception(_onUnhandledException.bindenv(this));
         server.setsendtimeoutpolicy(RETURN_ON_ERROR, WAIT_TIL_SENT, PMGR_SEND_TIMEOUT);
@@ -916,37 +903,11 @@ class ProductionManager {
             // NOTE: The first code deploy will not be recognized as a new deploy!
             _info("New deployment detected!");
             _isNewDeployment = true;
-            data = _initialData(!_shippingMode || data.shipped);
+            data = _initialData();
             _storeData(data);
         }
 
-        if (_shippingMode && !data.shipped) {
-            _info("Shipping mode is ON and the device has not been shipped yet");
-            _sleep(PMGR_MAX_SLEEP_TIME);
-        } else {
-            _startApp();
-        }
-    }
-
-    /**
-     * This method should be called when the device has been shipped (if shipping mode is enabled)
-     */
-    function shipped() {
-        local data = _getOrInitializeData();
-
-        if (data.shipped) {
-            return;
-        }
-
-        _info("The device has just been shipped! Starting the main application..");
-
-        // Set "shipped" flag
-        data.shipped = true;
-        _storeData(data);
-
-        // Restart to run the application
-        server.flush(PMGR_FLUSH_TIMEOUT);
-        imp.reset();
+        _startApp();
     }
 
     /**
@@ -1023,15 +984,12 @@ class ProductionManager {
     /**
      * Create and return the initial user configuration data
      *
-     * @param {boolean} shipped - True if the device is already shipped or shipping mode is disabled
-     *
      * @return {table} The initial user configuration data
      */
-    function _initialData(shipped) {
+    function _initialData() {
         return {
             "errorFlag": false,
             "lastError": null,
-            "shipped": shipped,
             "deploymentID": __EI.DEPLOYMENT_ID
         };
     }
@@ -1046,11 +1004,11 @@ class ProductionManager {
             local userConf = _readUserConf();
 
             if (userConf == null) {
-                _storeData(_initialData(false));
-                return _initialData(false);
+                _storeData(_initialData());
+                return _initialData();
             }
 
-            local fields = ["errorFlag", "lastError", "shipped", "deploymentID"];
+            local fields = ["errorFlag", "lastError", "deploymentID"];
             local data = userConf[PMGR_USER_CONFIG_FIELD];
 
             foreach (field in fields) {
@@ -1063,8 +1021,8 @@ class ProductionManager {
             _error("Error during parsing user configuration: " + err);
         }
 
-        _storeData(_initialData(_shippingMode));
-        return _initialData(_shippingMode);
+        _storeData(_initialData());
+        return _initialData();
     }
 
     /**
@@ -3190,72 +3148,6 @@ class ESP32Driver {
 }
 
 
-// Default polling period, in seconds
-const PR_DEFAULT_POLL_PERIOD = 1.0;
-// The value that indicates that the light was detected
-const PR_LIGHT_DETECTED_VALUE = 1;
-
-// Photoresistor class.
-// Used to poll a photoresistor
-class Photoresistor {
-    _valPin = null;
-    _switchPin = null;
-    _pollTimer = null;
-
-    /**
-     * Constructor for Photoresistor class
-     *
-     * @param {object} switchPin - Hardware pin object that switches power of the photoresistor
-     * @param {object} valPin - Hardware pin object used for reading the photoresistor's state/value
-     */
-    constructor(switchPin, valPin) {
-        _switchPin = switchPin;
-        _valPin = valPin;
-    }
-
-    /**
-     * Start polling of the photoresistor
-     *
-     * @param {function} callback - Callback to be called when the state/value on the photoresistor is changed
-     * @param {float} [pollPeriod = PR_DEFAULT_POLL_PERIOD] - Polling period
-     */
-    function startPolling(callback, pollPeriod = PR_DEFAULT_POLL_PERIOD) {
-        stopPolling();
-
-        ::debug("Starting polling.. Period = " + pollPeriod, "Photoresistor");
-
-        _switchPin.configure(DIGITAL_OUT, 1);
-        _valPin.configure(DIGITAL_IN_WAKEUP);
-
-        local poll;
-        local detected = false;
-
-        poll = function() {
-            _pollTimer = imp.wakeup(pollPeriod, poll);
-
-            if (detected != (_valPin.read() == PR_LIGHT_DETECTED_VALUE)) {
-                detected = !detected;
-                ::debug(detected ? "Light has been detected" : "No light detected anymore", "Photoresistor");
-                callback(detected);
-            }
-        }.bindenv(this);
-
-        poll();
-    }
-
-    /**
-     * Stop polling of the photoresistor
-     */
-    function stopPolling() {
-        _pollTimer && imp.cancelwakeup(_pollTimer);
-        _switchPin.disable();
-        _valPin.disable();
-
-        ::debug("Polling stopped", "Photoresistor");
-    }
-}
-
-
 // Accelerometer Driver class:
 // - utilizes LIS2DH12 accelerometer connected via I2C
 // - detects motion start event
@@ -4247,25 +4139,12 @@ class LocationMonitor {
     // Geofence settings, state, callback(s), timer(s) and etc.
     _geofence = null;
 
-    // Repossession mode settings, state, callback(s), timer(s) and etc.
-    _repossession = null;
-
     /**
      *  Constructor for Motion Monitor class.
      *  @param {object} locDriver - Location driver object.
      */
     constructor(locDriver) {
         _ld = locDriver;
-
-        // This table will be augmented by several fields from the configuration: "enabled" and "after"
-        _repossession = {
-            // A flag indicating if the repossession mode is activated
-            "activated": false,
-            // A timer to activate the repossession mode after the time specified in the configuration
-            "timer": null,
-            // Repossession event callback function
-            "eventCb": null
-        };
 
         // This table will be augmented by several fields from the configuration: "enabled", "lng", "lat" and "radius"
         _geofence = {
@@ -4310,7 +4189,6 @@ class LocationMonitor {
         _updCfgBLEDevices(cfg);
         _updCfgGeneral(cfg);
         _updCfgGeofence(cfg);
-        _updCfgRepossession(cfg);
 
         return Promise.resolve(null);
     }
@@ -4319,7 +4197,7 @@ class LocationMonitor {
      * Get status info
      *
      * @return {table} with the following keys and values:
-     *  - "flags": a table with keys "inGeofence" and "repossession"
+     *  - "flags": a table with keys "inGeofence"
      *  - "location": the last known (if any) or "default" location
      *  - "gnssInfo": extra GNSS info from LocationDriver
      */
@@ -4339,7 +4217,6 @@ class LocationMonitor {
         };
 
         (_geofence.inZone != null) && (res.flags.inGeofence <- _geofence.inZone);
-        _repossession.enabled && (res.flags.repossession <- _repossession.activated);
 
         return res;
     }
@@ -4356,15 +4233,6 @@ class LocationMonitor {
         // - Cancel the timer for periodic location reading (if the callback has just been
         //   unset and the other conditions don't require to read the location periodically)
         _managePeriodicLocReading(true);
-    }
-
-    /**
-     * Set a callback to be called when repossession mode is activated
-     *
-     * @param {function} repossessionEventCb - Callback function
-     */
-    function setRepossessionEventCb(repossessionEventCb) {
-        _repossession.eventCb = repossessionEventCb;
     }
 
     /**
@@ -4464,41 +4332,6 @@ class LocationMonitor {
         _geofence = mixTables(geofenceCfg, _geofence);
     }
 
-    function _updCfgRepossession(cfg) {
-        // There can be the following fields: "enabled" and "after"
-        local repossessionCfg = getValFromTable(cfg, "locationTracking/repossessionMode");
-
-        if (repossessionCfg) {
-            // repossessionCfg is not null - this means, we have some updates in parameters
-            mixTables(repossessionCfg, _repossession);
-
-            // Let's deactivate everything since the settings changed
-            _repossession.activated = false;
-            _repossession.timer && imp.cancelwakeup(_repossession.timer);
-
-            // And re-activate again if needed
-            if (_repossession.enabled) {
-                ::debug("Enabling repossession mode..", "LocationMonitor");
-
-                local activateRepossession = function() {
-                    ::debug("Repossession mode activated!", "LocationMonitor");
-
-                    _repossession.activated = true;
-                    _repossession.eventCb && _repossession.eventCb();
-                    _readLocation();
-                }.bindenv(this);
-
-                // If "after" is less than the current time, this timer will fire immediately
-                _repossession.timer = imp.wakeup(_repossession.after - time(), activateRepossession);
-            }
-
-            // This will either:
-            // - Cancel the timer for periodic location reading (if the new settings and the other conditions don't require this) OR
-            // - Do nothing (if periodic location reading is already running and still should be)
-            _managePeriodicLocReading();
-        }
-    }
-
     function _managePeriodicLocReading(reset = false) {
         if (_shouldReadPeriodically()) {
             // If the location reading timer is not currently set or if we should "reset" the periodic location reading,
@@ -4512,7 +4345,7 @@ class LocationMonitor {
     }
 
     function _shouldReadPeriodically() {
-        return _alwaysReadLocation || _locationCb || _repossession.activated;
+        return _alwaysReadLocation || _locationCb;
     }
 
     /**
@@ -4879,9 +4712,6 @@ class DataProcessor {
     // Motion Monitor driver object
     _mm = null;
 
-    // Photoresistor object
-    _pr = null;
-
     // Last temperature value
     _temperature = null;
 
@@ -4915,14 +4745,12 @@ class DataProcessor {
      *  @param {object} motionMon - Motion monitor object.
      *  @param {object} accelDriver - Accelerometer driver object.
      *  @param {object} batDriver - Battery driver object.
-     *  @param {object} photoresistor - Photoresistor object.
      */
-    constructor(locationMon, motionMon, accelDriver, batDriver, photoresistor) {
+    constructor(locationMon, motionMon, accelDriver, batDriver) {
         _ad = accelDriver;
         _lm = locationMon;
         _mm = motionMon;
         _bd = batDriver;
-        _pr = photoresistor;
 
         _allAlerts = {
             "shockDetected"         : false,
@@ -4930,19 +4758,16 @@ class DataProcessor {
             "motionStopped"         : false,
             "geofenceEntered"       : false,
             "geofenceExited"        : false,
-            "repossessionActivated" : false,
             "temperatureHigh"       : false,
             "temperatureLow"        : false,
-            "batteryLow"            : false,
-            "tamperingDetected"     : false
+            "batteryLow"            : false
         };
 
         _alertsSettings = {
             "shockDetected"     : {},
             "temperatureHigh"   : {},
             "temperatureLow"    : {},
-            "batteryLow"        : {},
-            "tamperingDetected" : {}
+            "batteryLow"        : {}
         };
     }
 
@@ -4962,7 +4787,6 @@ class DataProcessor {
         updateCfg(cfg);
 
         _lm.setGeofencingEventCb(_onGeofencingEvent.bindenv(this));
-        _lm.setRepossessionEventCb(_onRepossessionEvent.bindenv(this));
         _mm.setMotionEventCb(_onMotionEvent.bindenv(this));
 
         return Promise.resolve(null);
@@ -5005,7 +4829,6 @@ class DataProcessor {
         local temperatureHighCfg   = getValFromTable(alertsCfg, "temperatureHigh");
         local temperatureLowCfg    = getValFromTable(alertsCfg, "temperatureLow");
         local batteryLowCfg        = getValFromTable(alertsCfg, "batteryLow");
-        local tamperingDetectedCfg = getValFromTable(alertsCfg, "tamperingDetected");
 
         if (shockDetectedCfg) {
             _allAlerts.shockDetected = false;
@@ -5024,11 +4847,6 @@ class DataProcessor {
             _allAlerts.batteryLow = false;
             mixTables(batteryLowCfg, _alertsSettings.batteryLow);
         }
-        if (tamperingDetectedCfg) {
-            _allAlerts.tamperingDetected = false;
-            mixTables(tamperingDetectedCfg, _alertsSettings.tamperingDetected);
-            _configureTamperingDetection();
-        }
     }
 
     function _configureShockDetection() {
@@ -5038,15 +4856,6 @@ class DataProcessor {
             _ad.enableShockDetection(_onShockDetectedEvent.bindenv(this), settings);
         } else {
             _ad.enableShockDetection(null);
-        }
-    }
-
-    function _configureTamperingDetection() {
-        if (_alertsSettings.tamperingDetected.enabled) {
-            ::debug("Activating tampering detection..", "DataProcessor");
-            _pr.startPolling(_onLightDetectedEvent.bindenv(this), _alertsSettings.tamperingDetected.pollingPeriod);
-        } else {
-            _pr.stopPolling();
         }
     }
 
@@ -5346,27 +5155,6 @@ class DataProcessor {
         }
 
         _dataProc();
-    }
-
-    /**
-     *  The handler is called when repossession mode is activated
-     */
-    function _onRepossessionEvent() {
-        _allAlerts.repossessionActivated = true;
-
-        _dataProc();
-    }
-
-    /**
-     *  This handler is called when a light detection event happens.
-     *  @param {bool} eventType - true: light is detected, false: light is no longer present
-     */
-    function _onLightDetectedEvent(eventType) {
-        if (eventType) {
-            _allAlerts.tamperingDetected = true;
-
-            _dataProc();
-        }
     }
 }
 
@@ -6353,7 +6141,7 @@ class Application {
         ledIndication = LedIndication(HW_LED_RED_PIN, HW_LED_GREEN_PIN, HW_LED_BLUE_PIN);
 
         // Switch off all flip-flops by default (except the ublox's backup pin)
-        local flipFlops = [HW_ESP_POWER_EN_PIN, HW_LDR_POWER_EN_PIN];
+        local flipFlops = [HW_ESP_POWER_EN_PIN];
         foreach (flipFlop in flipFlops) {
             flipFlop.configure(DIGITAL_OUT, 0);
             flipFlop.disable();
@@ -6371,8 +6159,6 @@ class Application {
 
             // Create and initialize Battery Monitor
             local batteryMon = BatteryMonitor(HW_BAT_LEVEL_POWER_EN_PIN, HW_BAT_LEVEL_PIN);
-            // Create and initialize Photoresistor
-            local photoresistor = Photoresistor(HW_LDR_POWER_EN_PIN, HW_LDR_PIN);
             // Create and initialize Location Driver
             local locationDriver = LocationDriver();
             // Create and initialize Accelerometer Driver
@@ -6382,7 +6168,7 @@ class Application {
             // Create and initialize Motion Monitor
             local motionMon = MotionMonitor(accelDriver, locationMon);
             // Create and initialize Data Processor
-            local dataProc = DataProcessor(locationMon, motionMon, accelDriver, batteryMon, photoresistor);
+            local dataProc = DataProcessor(locationMon, motionMon, accelDriver, batteryMon);
             // Create and initialize SIM Updater
             local simUpdater = SimUpdater();
             // Create and initialize Cfg Manager
@@ -6523,36 +6309,11 @@ rm <- null;
 // LED indication
 ledIndication <- null;
 
-// Used to track the shipping of the device. Once the device has been shipped,
-// the photoresistor will detect the light
-local photoresistor = Photoresistor(HW_LDR_POWER_EN_PIN, HW_LDR_PIN);
-
 // Callback to be called by Production Manager if it allows to run the main application
 local startApp = function() {
-    // Stop polling as we are going to start the main app => the device has already been shipped.
-    // This is guaranteed to be called after (!) the startPolling() call as the startApp callback
-    // is called asynchronously (using imp.wakeup)
-    photoresistor.stopPolling();
     // Run the application
     ::app <- Application();
 };
 
-pm <- ProductionManager(startApp, true);
+pm <- ProductionManager(startApp);
 pm.start();
-
-// If woken by the photoresistor (the wake-up pin was HIGH), the device has been shipped
-if (hardware.wakereason() == WAKEREASON_PIN) {
-    pm.shipped();
-} else {
-    local onLightDetected = function(_) {
-        photoresistor.stopPolling();
-        pm.shipped();
-    }.bindenv(this);
-
-    // Start polling to be sure we will not miss light detection while the device is
-    // awake (= the wake-up pin is not working for the light detection).
-    // Also, this will switch ON (via a flip-flop) the photoresistor and configure the wake-up
-    // pin so the light detection is enabled during the deep sleep
-    photoresistor.startPolling(onLightDetected);
-}
-
