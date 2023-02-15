@@ -415,7 +415,7 @@ Logger <- {
 ::info  <- Logger.info.bindenv(Logger);
 ::error <- Logger.error.bindenv(Logger);
 
-Logger.setLogLevelStr("INFO");
+Logger.setLogLevelStr("DEBUG");
 
 
 /**
@@ -6215,7 +6215,7 @@ class Application {
         // Configure and intialize Replay Messenger.
         // Customized Replay Messenger is used.
         local rmConfig = {
-            "debug"      : false,
+            "debug"      : true,
             "maxRate"    : APP_RM_MSG_SENDING_MAX_RATE,
             "resendLimit": APP_RM_MSG_RESEND_LIMIT
         };
