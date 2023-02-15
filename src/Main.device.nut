@@ -38,7 +38,7 @@
 
 
 // Application Version
-const APP_VERSION = "3.1.2-custom";
+const APP_VERSION = "3.1.2-remoteid";
 
 
 // Constants common for the imp-agent and the imp-device
@@ -2503,6 +2503,134 @@ const ESP32_BLE_SCAN_WINDOW = 83;
 // BLE advertisements scan period, in seconds
 const ESP32_BLE_SCAN_PERIOD = 6;
 
+const BLE_ADV_DATA_PREFIX = "1E16FAFF0D";
+const BLE_ADV_PROTO_VER = "2";
+enum BLE_ADV_MSG_TYPE {
+    BASIC_ID = "0",
+    LOCATION_VECTOR = "1",
+    AUTH = "2",
+    SELF_ID = "3",
+    SYSTEM = "4",
+    OPERATOR_ID = "5",
+    MESSAGE_PACK = "F"
+};
+enum BLE_ADV_BASIC_ID_TYPE {
+    NONE = "0",
+    SERIAL_NUMBER = "1",
+    CAA_ASSIGNED_REG_ID = "2",
+    UTM_ASSIGNED_UUID = "3",
+    SPECIFIC_SESSION_ID = "4"
+};
+enum BLE_ADV_SELF_ID_DESC_TYPE {
+    TEXT = "00",
+    EMERGENCY = "01",
+    EXTENDED_STATUS = "02"
+};
+enum BLE_ADV_OPERATOR_ID_TYPE {
+    OPERATOR_ID = "00"
+};
+enum BLE_ADV_UA_TYPE {
+    NONE = "0",
+    AEROPLANE = "1",
+    HELI_MULTIROTOR = "2",
+    GYROPLANE = "3",
+    HYBRID_LIFT = "4",
+    ORNITHOPTER = "5",
+    GLIDER = "6",
+    KITE = "7",
+    FREE_BALLOON = "8",
+    CAPTIVE_BALLOON = "9",
+    AIRSHIP = "A",
+    FREE_FALL_PARA = "B",
+    ROCKET = "C",
+    TETHERED_POWERED_AIRCRAFT = "D",
+    GROUND_OBSTACLE = "E",
+    OTHER = "F"
+};
+enum BLE_ADV_OP_STATUS {
+    UNDECLARED = "0",
+    GROUND = "1",
+    AIRBORNE = "2",
+    EMERGENCY = "3",
+    REMOTE_ID_SYS_FAILURE = "4"
+};
+enum BLE_ADV_HEIGHT_TYPE {
+    ABOVE_TAKEOFF = 0,
+    AGL = 1
+};
+enum BLE_ADV_HORIZ_ACC {
+    GTE_18520M_UNKNOWN = "0",
+    LT_18520M = "1",
+    LT_7408M = "2",
+    LT_3704M = "3",
+    LT_1852M = "4",
+    LT_926M = "5",
+    LT_555D6M = "6",
+    LT_185D2M = "7",
+    LT_92D6M = "8",
+    LT_30M = "9",
+    LT_10M = "A",
+    LT_3M = "B",
+    LT_1M = "C"
+};
+enum BLE_ADV_VERT_ACC {
+    GTE_150M_UNKNOWN = "0",
+    LT_150M = "1",
+    LT_45M = "2",
+    LT_25M = "3",
+    LT_10M = "4",
+    LT_3M = "5",
+    LT_1M = "6"
+};
+enum BLE_ADV_SPEED_ACC {
+    GTE_10MS_UNKNOWN = "0",
+    LT_10MS = "1",
+    LT_3MS = "2",
+    LT_1MS = "3",
+    LT_0D3MS = "4"
+};
+enum BLE_ADV_OP_LOC_SRC {
+    TAKEOFF = 0,
+    DYNAMIC = 1,
+    FIXED = 2
+};
+enum BLE_ADV_UA_CLASS_TYPE {
+    UNDECLARED = 0,
+    EUROPEAN_UNION = 1
+};
+enum BLE_ADV_UA_CLASS_1_CAT {
+    UNDEFINED = "0",
+    OPEN = "1",
+    SPECIFIC = "2",
+    CERTIFIED = "3"
+};
+enum BLE_ADV_UA_CLASS_1_CLASS {
+    UNDEFINED = "0",
+    CLASS_0 = "1",
+    CLASS_1 = "2",
+    CLASS_2 = "3",
+    CLASS_3 = "4",
+    CLASS_4 = "5",
+    CLASS_5 = "6",
+    CLASS_6 = "7"
+};
+enum BLE_ADV_AUTH_TYPE {
+    NONE = "0",
+    UAS_ID_SIG = "1",
+    OP_ID_SIG = "2",
+    MSG_SET_SIG = "3",
+    PROVIDED_BY_NET_REMOTE_ID = "4",
+    SPECIFIC_AUTH_METHOD = "5"
+};
+MsgCounter <- {
+    basicId = -1
+    locationVector = -1
+    auth = -1
+    selfId = -1
+    system = -1
+    operatorId = -1
+};
+
 // ESP32 Driver class.
 // Ability to work with WiFi networks and BLE
 class ESP32Driver {
@@ -2518,6 +2646,9 @@ class ESP32Driver {
     _initialized = false;
     // Timer for automatic switch-off of the ESP32 board when idle
     _switchOffTimer = null;
+
+    readyMsgValidator = @(data, _) data.find("\r\nready\r\n") != null;
+    okValidator = @(data, _) data.find("\r\nOK\r\n") != null;
 
     /**
      * Constructor for ESP32 Driver Class
@@ -2722,9 +2853,6 @@ class ESP32Driver {
 
         _switchOn();
 
-        local readyMsgValidator   = @(data, _) data.find("\r\nready\r\n") != null;
-        local okValidator         = @(data, _) data.find("\r\nOK\r\n") != null;
-
         local cmdSetPrintMask = format("AT+CWLAPOPT=0,%d",
                                        ESP32_WIFI_SCAN_PRINT_MASK.SHOW_SSID |
                                        ESP32_WIFI_SCAN_PRINT_MASK.SHOW_MAC |
@@ -2740,22 +2868,13 @@ class ESP32Driver {
 
         // Functions that return promises which will be executed serially
         local promiseFuncs = [
-            // Wait for "ready" message
             _communicate(null, readyMsgValidator),
-            // Restore Factory Default Settings
             _communicate("AT+RESTORE", okValidator),
-            // Wait for "ready" message once again
             _communicate(null, readyMsgValidator),
-            // Check Version Information
-            _communicate("AT+GMR", okValidator, _logVersionInfo),
-            // Set the Wi-Fi Mode to "Station"
-            _communicate(format("AT+CWMODE=%d", ESP32_WIFI_MODE.STATION), okValidator),
-            // Set the Configuration for the Command AT+CWLAP (Wi-Fi scanning)
-            _communicate(cmdSetPrintMask, okValidator),
-            // Initialize the role of BLE
-            _communicate(format("AT+BLEINIT=%d", ESP32_BLE_ROLE.CLIENT), okValidator),
-            // Set the parameters of Bluetooth LE scanning
-            _communicate(cmdSetBLEScanParam, okValidator)
+            _communicate(format("AT+CWMODE=%d", ESP32_WIFI_MODE.DISABLE), okValidator),
+            _communicate(format("AT+BLEINIT=%d", ESP32_BLE_ROLE.SERVER), okValidator),
+            _communicate("AT+BLEADVPARAM=32,32,3,0,7,0", okValidator),
+            _communicate("AT+BLEADVSTART", okValidator)
         ];
 
         return Promise.serial(promiseFuncs)
@@ -2765,6 +2884,325 @@ class ESP32Driver {
         }.bindenv(this), function(err) {
             throw "Initialization failure: " + err;
         }.bindenv(this));
+    }
+
+    function sequenceAdv(location) {
+        if (_initialized) ::debug("Starting sequenceAdv with location: " + location, "ESP32Driver");
+        else ::debug("BLE not yet initialized, skipping sequenceAdv", "ESP32Driver");
+
+        // Functions that return promises which will be executed serially
+        local promiseFuncs = [
+            updateAdv(generateBasicIdMsg(
+                BLE_ADV_BASIC_ID_TYPE.SERIAL_NUMBER, // idType
+                BLE_ADV_UA_TYPE.HELI_MULTIROTOR, // uaType
+                "112624150A90E3AE1EC0" // idText
+            )),
+            updateAdv(generateBasicIdMsg(
+                BLE_ADV_BASIC_ID_TYPE.SPECIFIC_SESSION_ID, // idType
+                BLE_ADV_UA_TYPE.HELI_MULTIROTOR, // uaType
+                "FD3454B778E565C24B70" // idText
+            )),
+            updateAdv(generateLocationVectorMsg(
+                BLE_ADV_OP_STATUS.AIRBORNE, // status
+                BLE_ADV_HEIGHT_TYPE.AGL, // heightType
+                location.headingVehicle, // trackDir
+                location.groundSpeed, // speed
+                location.velocityVert, // vertSpeed
+                location.latitude, // lat
+                location.longitude, // lon
+                0, // pressAlt
+                location.altitude, // geoAlt
+                location.altitude, // height
+                getVertAcc(location.accVert), // vertAcc
+                getHorizAcc(location.accHoriz), // horizAcc
+                getVertAcc(location.accVert), // altAcc
+                getSpeedAcc(location.accSpeed) // spdAcc
+            )),
+            updateAdv(generateAuthMsgPg0(
+                BLE_ADV_AUTH_TYPE.UAS_ID_SIG, // authType
+                2, // lastPageIndex
+                63, // dataLengthBytes
+                "3132333435363738393031323334353637" // authData
+            )),
+            updateAdv(generateAuthMsg(
+                BLE_ADV_AUTH_TYPE.UAS_ID_SIG, // authType
+                1, // dataPage
+                "3132333435363738393031323334353637383930313233" // authData
+            )),
+            updateAdv(generateAuthMsg(
+                BLE_ADV_AUTH_TYPE.UAS_ID_SIG, // authType
+                2, // dataPage
+                "3132333435363738393031323334353637383930313233" // authData
+            )),
+            updateAdv(generateSelfIdMsg("Drone ID test flight---")),
+            updateAdv(generateSystemMsg(
+                BLE_ADV_OP_LOC_SRC.TAKEOFF, // opLocSrc
+                BLE_ADV_UA_CLASS_TYPE.EUROPEAN_UNION, // uaClassType
+                location.latitude, // opLat
+                location.longitude, // opLon
+                1, // areaCount
+                0, // areaRadius
+                0, // areaCeiling
+                0, // areaFloor
+                BLE_ADV_UA_CLASS_1_CAT.OPEN, // uaClass1Cat
+                BLE_ADV_UA_CLASS_1_CLASS.CLASS_1, // uaClass1Class
+                0 // opAlt
+            )),
+            updateAdv(generateOperatorIdMsg("FIN87astrdge12k8"))
+        ];
+
+        return Promise.serial(promiseFuncs)
+        .then(function(_) {
+            ::debug("sequenceAdv complete", "ESP32Driver");
+        }.bindenv(this), function(err) {
+            throw "sequenceAdv failure: " + err;
+        }.bindenv(this));
+    }
+
+    function getPrefixHeader(msgType, incCounter = true) {
+        local msgCounter;
+        if (incCounter) msgCounter = incMsgCounter(msgType);
+        else msgCounter = getMsgCounter(msgType);
+        local msgCounterHex = integerToHexString(msgCounter);
+        return BLE_ADV_DATA_PREFIX + msgCounterHex + msgType + BLE_ADV_PROTO_VER;
+    }
+
+    function generateBasicIdMsg(idType, uaType, idText) {
+        ::debug("generateBasicIdMsg: " + idText, "ESP32Driver");
+        if (idText.len() > 20) throw "Basic ID text must not exceed 20 characters";
+        local idTextHex = stringToHexString(idText, 20);
+        return getPrefixHeader(BLE_ADV_MSG_TYPE.BASIC_ID) +
+            idType + uaType + idTextHex + "000000";
+    }
+
+    function generateLocationVectorMsg(
+        status, heightType, trackDir, speed, vertSpeed, lat, lon,
+        pressAlt, geoAlt, height, vertAcc, horizAcc, altAcc, spdAcc
+    ) {
+        ::debug("generateLocationVectorMsg", "ESP32Driver");
+        local flags = heightType << 2;
+        if (trackDir >= 180) {
+            trackDir -= 180;
+            flags = flags | 1 << 1; // Set direction segment flag to 1
+        }
+        local trackDirHex = integerToHexString(trackDir.tointeger());
+        if (speed <= 255 * 0.25) {
+            speed = speed * 4;
+        } else if (speed > 255 * 0.22 && speed < 254.25) {
+            speed = (speed - (255 * 0.25)) / 0.75;
+            flags = flags | 1; // Set multiplier flag to 1
+        } else {
+            speed = 254;
+            flags = flags | 1; // Set multiplier flag to 1
+        }
+        local flagsHex = integerToHexString(flags, 1);
+        local speedHex = integerToHexString(speed.tointeger());
+        local vertSpeedHex = integerToHexString((vertSpeed * 2).tointeger());
+        local latHex = latLonToHex(lat);
+        local lonHex = latLonToHex(lon);
+        local pressAltHex = altToHex(pressAlt);
+        local geoAltHex= altToHex(geoAlt);
+        local heightHex = altToHex(height);
+        local timestampHex = getTenthsSecAfterHourHex();
+        local timestampAccHex = integerToHexString(1, 1); // 1 = 0.1s (range: 0.1 - 1.5)
+        return getPrefixHeader(BLE_ADV_MSG_TYPE.LOCATION_VECTOR) +
+            status + flagsHex + trackDirHex + speedHex + vertSpeedHex +
+            latHex + lonHex + pressAltHex + geoAltHex + heightHex + vertAcc + horizAcc +
+            altAcc + spdAcc + timestampHex + "0" + timestampAccHex + "00";
+    }
+
+    function generateAuthMsgPg0(
+        authType, lastPageIndex, dataLengthBytes, authData
+    ) {
+        ::debug("generateAuthMsgPg0", "ESP32Driver");
+        local dataPageHex = integerToHexString(0, 1);
+        local lastPageIndexHex = integerToHexString(lastPageIndex, 1);
+        local dataLengthBytesHex = integerToHexString(dataLengthBytes);
+        local timestampHex = getRemoteIdTimeHex();
+        return getPrefixHeader(BLE_ADV_MSG_TYPE.AUTH) +
+            authType + dataPageHex + "0" + lastPageIndexHex +
+            dataLengthBytesHex + timestampHex + authData;
+    }
+
+    function generateAuthMsg(authType, dataPage, authData) {
+        ::debug("generateAuthMsg", "ESP32Driver");
+        local dataPageHex = integerToHexString(dataPage, 1);
+        return getPrefixHeader(BLE_ADV_MSG_TYPE.AUTH, false) +
+            authType + dataPageHex + authData;
+    }
+
+    function generateSelfIdMsg(text) {
+        ::debug("generateSelfIdMsg: " + text, "ESP32Driver");
+        if (text.len() > 23) throw "Self ID text must not exceed 23 characters";
+        return getPrefixHeader(BLE_ADV_MSG_TYPE.SELF_ID) +
+            BLE_ADV_SELF_ID_DESC_TYPE.TEXT + stringToHexString(text, 23);
+    }
+
+    function generateSystemMsg(
+        opLocSrcFlag, uaClassTypeFlag, opLat, opLon, areaCount, areaRadius,
+        areaCeiling, areaFloor, uaClass1Cat, uaClass1Class, opAlt
+    ) {
+        ::debug("generateSystemMsg", "ESP32Driver");
+        local flagsHex = integerToHexString(opLocSrcFlag | uaClassTypeFlag << 2);
+        local latHex = latLonToHex(opLat);
+        local lonHex = latLonToHex(opLon);
+        local areaCountHex = int16ToLeHexString(areaCount);
+        local areaRadiusHex = integerToHexString((areaRadius * 10).tointeger());
+        local areaCeilingHex = altToHex(areaCeiling);
+        local areaFloorHex = altToHex(areaFloor);
+        local altHex = altToHex(opAlt);
+        local timestampHex = getRemoteIdTimeHex();
+        return getPrefixHeader(BLE_ADV_MSG_TYPE.SYSTEM) +
+            flagsHex + latHex + lonHex +
+            areaCountHex + areaRadiusHex + areaCeilingHex + areaFloorHex +
+            uaClass1Cat + uaClass1Class + altHex + timestampHex + "00";
+    }
+
+    function generateOperatorIdMsg(text) {
+        ::debug("generateOperatorIdMsg: " + text, "ESP32Driver");
+        if (text.len() > 20) throw "Operator ID text must not exceed 20 characters";
+        return getPrefixHeader(BLE_ADV_MSG_TYPE.OPERATOR_ID) +
+            BLE_ADV_OPERATOR_ID_TYPE.OPERATOR_ID +
+            stringToHexString(text, 20) + "000000";
+    }
+
+    function getMsgCounter(type) {
+        ::debug("getMsgCounter: " + type, "ESP32Driver");
+        switch (type) {
+            case BLE_ADV_MSG_TYPE.BASIC_ID: return MsgCounter.basicId;
+            case BLE_ADV_MSG_TYPE.LOCATION_VECTOR: return MsgCounter.locationVector;
+            case BLE_ADV_MSG_TYPE.AUTH: return MsgCounter.auth;
+            case BLE_ADV_MSG_TYPE.SELF_ID: return MsgCounter.selfId;
+            case BLE_ADV_MSG_TYPE.SYSTEM: return MsgCounter.system;
+            case BLE_ADV_MSG_TYPE.OPERATOR_ID: return MsgCounter.operatorId;
+        }
+    }
+
+    function incMsgCounter(type) {
+        switch (type) {
+            case BLE_ADV_MSG_TYPE.BASIC_ID:
+                return MsgCounter.basicId = incAs8Bit(MsgCounter.basicId);
+            case BLE_ADV_MSG_TYPE.LOCATION_VECTOR:
+                return MsgCounter.locationVector = incAs8Bit(MsgCounter.locationVector);
+            case BLE_ADV_MSG_TYPE.AUTH:
+                return MsgCounter.auth = incAs8Bit(MsgCounter.auth);
+            case BLE_ADV_MSG_TYPE.SELF_ID:
+                return MsgCounter.selfId = incAs8Bit(MsgCounter.selfId);
+            case BLE_ADV_MSG_TYPE.SYSTEM:
+                return MsgCounter.system = incAs8Bit(MsgCounter.system);
+            case BLE_ADV_MSG_TYPE.OPERATOR_ID:
+                return MsgCounter.operatorId = incAs8Bit(MsgCounter.operatorId);
+        }
+    }
+
+    function incAs8Bit(i) {
+        if (i >= 0xFF) return 0;
+        else return ++i;
+    }
+
+    function latLonToHex(latOrLon) {
+        return int32ToLeHexString((latOrLon * math.pow(10,7)).tointeger());
+    }
+
+    function altToHex(alt) {
+        return int16ToLeHexString(((alt + 1000) * 2).tointeger());
+    }
+
+    function getRemoteIdTimeHex(unixTime = time()) {
+        return int32ToLeHexString(unixTime - 1546300800);
+    }
+
+    function getTenthsSecAfterHourHex() {
+        local date = date();
+        local tenthsSec = date.min * 600 + date.sec * 10 + date.usec / 100;
+        return int16ToLeHexString(tenthsSec);
+    }
+
+    function getHorizAcc(accMeters) {
+        if (accMeters < 1) return BLE_ADV_HORIZ_ACC.LT_1M;
+        else if (accMeters < 3) return BLE_ADV_HORIZ_ACC.LT_3M;
+        else if (accMeters < 10) return BLE_ADV_HORIZ_ACC.LT_10M;
+        else if (accMeters < 30) return BLE_ADV_HORIZ_ACC.LT_30M;
+        else if (accMeters < 92.6) return BLE_ADV_HORIZ_ACC.LT_92D6M;
+        else if (accMeters < 185.2) return BLE_ADV_HORIZ_ACC.LT_185D2M;
+        else if (accMeters < 555.6) return BLE_ADV_HORIZ_ACC.LT_555D6M;
+        else if (accMeters < 926) return BLE_ADV_HORIZ_ACC.LT_926M;
+        else if (accMeters < 1852) return BLE_ADV_HORIZ_ACC.LT_1852M;
+        else if (accMeters < 3704) return BLE_ADV_HORIZ_ACC.LT_3704M;
+        else if (accMeters < 7408) return BLE_ADV_HORIZ_ACC.LT_7408M;
+        else if (accMeters < 18520) return BLE_ADV_HORIZ_ACC.LT_18520M;
+        else return BLE_ADV_HORIZ_ACC.GTE_18520M_UNKNOWN;
+    }
+
+    function getVertAcc(accMeters) {
+        if (accMeters < 1) return BLE_ADV_VERT_ACC.LT_1M;
+        else if (accMeters < 3) return BLE_ADV_VERT_ACC.LT_3M;
+        else if (accMeters < 10) return BLE_ADV_VERT_ACC.LT_10M;
+        else if (accMeters < 25) return BLE_ADV_VERT_ACC.LT_25M;
+        else if (accMeters < 45) return BLE_ADV_VERT_ACC.LT_45M;
+        else if (accMeters < 150) return BLE_ADV_VERT_ACC.LT_150M;
+        else return BLE_ADV_VERT_ACC.GTE_150M_UNKNOWN;
+    }
+
+    function getSpeedAcc(accMetersSec) {
+        if (accMetersSec < 0.3) return BLE_ADV_SPEED_ACC.LT_0D3MS;
+        else if (accMetersSec < 1) return BLE_ADV_SPEED_ACC.LT_1MS;
+        else if (accMetersSec < 3) return BLE_ADV_SPEED_ACC.LT_3MS;
+        else if (accMetersSec < 10) return BLE_ADV_SPEED_ACC.LT_10MS;
+        else return BLE_ADV_SPEED_ACC.GTE_10MS_UNKNOWN;
+    }
+
+    /**
+     * Convert a decimal integer into a hex string.
+     * Based on function in utilities lib, removing "0x" prefix and setting uppecase.
+     *
+     * @param {integer} i   - The integer
+     * @param {integer} [n] - The number of characters in the hex string. Default: 2
+     *
+     * @returns {string} The hex string representation
+     */
+    function integerToHexString(i, n = 2) {
+        if (typeof i != "integer") throw "integerToHexString() requires an integer";
+        local fs = "%0" + n.tostring() + "x";
+        return format(fs, i).toupper();
+    }
+
+    function int16ToLeHexString(i) {
+        return integerToHexString(swap2(i), 4);
+    }
+
+    function int32ToLeHexString(i) {
+        return integerToHexString(swap4(i), 8);
+    }
+
+    function stringToHexString(text, byteLength) {
+        local dataBlob = blob(byteLength);
+        dataBlob.writestring(text);
+        return blobToHexString(dataBlob);
+    }
+
+    /**
+     * Convert a blob (array of bytes) to a hex string.
+     * Based on function in utilities lib, removing "0x" prefix and setting uppecase.
+     *
+     * @param {integer} b   - The blob
+     * @param {integer} [n - The number of characters assigned to each byte in the hex string. Default: 2
+     *
+     * @returns {string} The hex string representation
+     */
+    function blobToHexString(b, n = 2) {
+        if (typeof b != "blob") throw "blobToHexString() requires a blob";
+        if (b.len() == 0) throw "blobToHexString() requires a non-zero blob";
+        local s = "";
+        if (n % 2 != 0) n++;
+        if (n < 2) n = 2;
+        local fs = "%0" + n.tostring() + "x";
+        for (local i = 0 ; i < b.len() ; i++) s += format(fs, b[i]);
+        return s.toupper();
+    }
+
+    function updateAdv(data, wrapInAFunc = true) {
+        return _communicate("AT+BLEADVDATA=\"" + data + "\"", okValidator, null, wrapInAFunc);
     }
 
     /**
@@ -4138,7 +4576,7 @@ class LocationMonitor {
     _locReadingPromise = null;
 
     // If true, activate unconditional periodic location reading
-    _alwaysReadLocation = false;
+    _alwaysReadLocation = true;
 
     // Geofence settings, state, callback(s), timer(s) and etc.
     _geofence = null;
@@ -4211,7 +4649,10 @@ class LocationMonitor {
             "type": "gnss",
             "accuracy": MM_EARTH_RAD,
             "longitude": INIT_LONGITUDE,
-            "latitude": INIT_LATITUDE
+            "latitude": INIT_LATITUDE,
+            "altitude": 0.0,
+            "groundSpeed": 0.0,
+            "velocity": 0.0
         };
 
         local res = {
@@ -4231,6 +4672,7 @@ class LocationMonitor {
      * @param {function | null} locationCb - Location callback. Or null to unset the callback
      */
     function setLocationCb(locationCb) {
+        ::debug("setLocationCb", "LocationMonitor");
         _locationCb = locationCb;
         // This will either:
         // - Run periodic location reading (if a callback has just been set) OR
@@ -4303,6 +4745,7 @@ class LocationMonitor {
     // -------------------- PRIVATE METHODS -------------------- //
 
     function _updCfgGeneral(cfg) {
+        ::debug("_updCfgGeneral", "LocationMonitor");
         local readingPeriod = getValFromTable(cfg, "locationTracking/locReadingPeriod");
         _alwaysReadLocation = getValFromTable(cfg, "locationTracking/alwaysOn", _alwaysReadLocation);
         _locReadingPeriod = readingPeriod != null ? readingPeriod : _locReadingPeriod;
@@ -4337,6 +4780,7 @@ class LocationMonitor {
     }
 
     function _managePeriodicLocReading(reset = false) {
+        ::debug("_managePeriodicLocReading - reset: " + reset, "LocationMonitor");
         if (_shouldReadPeriodically()) {
             // If the location reading timer is not currently set or if we should "reset" the periodic location reading,
             // let's call _readLocation right now. This will cancel the existing timer (if any) and request the location
@@ -4356,6 +4800,7 @@ class LocationMonitor {
      *  Try to determine the current location
      */
     function _readLocation() {
+        ::debug("_readLocation - _locReadingPromise: " + (_locReadingPromise != null), "LocationMonitor");
         if (_locReadingPromise) {
             return;
         }
@@ -4376,13 +4821,13 @@ class LocationMonitor {
         }.bindenv(this))
         .finally(function(_) {
             _locReadingPromise = null;
-
-            if (_shouldReadPeriodically()) {
-                // Calculate the delay for the timer according to the time spent on location reading
-                local delay = _locReadingPeriod - (hardware.millis() - start) / 1000.0;
-                ::debug(format("Setting the timer for location reading in %d sec", delay), "LocationMonitor");
-                _locReadingTimer = imp.wakeup(delay, _readLocation.bindenv(this));
-            }
+            _readLocation()
+            // if (_shouldReadPeriodically()) {
+            //     // Calculate the delay for the timer according to the time spent on location reading
+            //     local delay = _locReadingPeriod - (hardware.millis() - start) / 1000.0;
+            //     ::debug(format("Setting the timer for location reading in %d sec", delay), "LocationMonitor");
+            //     _locReadingTimer = imp.wakeup(delay, _readLocation.bindenv(this));
+            // }
         }.bindenv(this));
     }
 
@@ -4894,6 +5339,7 @@ class DataProcessor {
      *  Data and alerts reading and processing.
      */
     function _dataProc() {
+        ::debug("dataProc", "DataProcessor");
         if (_dataReadingPromise) {
             return _dataReadingPromise;
         }
@@ -4963,6 +5409,7 @@ class DataProcessor {
             }
 
             _dataReadingTimer && imp.cancelwakeup(_dataReadingTimer);
+            ::debug("_dataReadingPeriod: " + _dataReadingPeriod, "DataProcessor");
             _dataReadingTimer = imp.wakeup(_dataReadingPeriod,
                                            _dataProcTimerCb.bindenv(this));
 
@@ -5212,8 +5659,6 @@ class LocationDriver {
     _gettingAssistData = null;
     // Fails counter for GNSS. If it exceeds the threshold, the cooldown period will be applied
     _gnssFailsCounter = 0;
-    // ESP32Driver object
-    _esp = null;
     // True if location using BLE devices is enabled, false otherwise
     _bleDevicesEnabled = false;
     // Known BLE devices
@@ -5235,7 +5680,6 @@ class LocationDriver {
         };
 
         cm.onConnect(_onConnected.bindenv(this), "LocationDriver");
-        _esp = ESP32Driver(HW_ESP_POWER_EN_PIN, HW_ESP_UART);
         _updateAssistData();
     }
 
@@ -5286,27 +5730,14 @@ class LocationDriver {
             return _gettingLocation;
         }
 
-        return _gettingLocation = _getLocationBLEDevices()
-        .fail(function(err) {
-            if (err == null) {
-                ::debug("Location using BLE devices is disabled", "LocationDriver");
-            } else {
-                ::info("Couldn't get location using BLE devices: " + err, "LocationDriver");
-            }
-
-            return _getLocationGNSS();
-        }.bindenv(this))
-        .fail(function(err) {
-            ::info("Couldn't get location using GNSS: " + err, "LocationDriver");
-            return _getLocationCellTowersAndWiFi();
-        }.bindenv(this))
+        return _gettingLocation = _getLocationGNSS()
         .then(function(location) {
             _gettingLocation = null;
             // Save this location as the last known one
             _save(location, LD_FILE_NAMES.LAST_KNOWN_LOCATION, Serializer.serialize.bindenv(Serializer));
             return location;
         }.bindenv(this), function(err) {
-            ::info("Couldn't get location using WiFi networks and cell towers: " + err, "LocationDriver");
+            ::info("Couldn't get location using GNSS: " + err, "LocationDriver");
             _gettingLocation = null;
             return Promise.reject(null);
         }.bindenv(this));
@@ -5381,6 +5812,7 @@ class LocationDriver {
                     _gnssFailsCounter = 0;
                     imp.cancelwakeup(timeoutTimer);
                     _disableUBlox();
+                    esp.sequenceAdv(location);
                     resolve(location);
                 }.bindenv(this);
 
@@ -5407,7 +5839,7 @@ class LocationDriver {
         local locType = null;
 
         // Run WiFi scanning in the background
-        local scanWifiPromise = _esp.scanWiFiNetworks()
+        local scanWifiPromise = esp.scanWiFiNetworks()
         .then(function(wifis) {
             scannedWifis = wifis.len() > 0 ? wifis : null;
         }.bindenv(this), function(err) {
@@ -5494,7 +5926,7 @@ class LocationDriver {
         local knownGeneric = _knownBLEDevices.generic;
         local knownIBeacons = _knownBLEDevices.iBeacon;
 
-        return _esp.scanBLEAdverts()
+        return esp.scanBLEAdverts()
         .then(function(adverts) {
             // Table of "recognized" advertisements (for which the location is known) and their locations
             local recognized = {};
@@ -5713,12 +6145,12 @@ class LocationDriver {
      * @return {function} Handler called when a navigation message received
      */
     function _onUBloxNavMsgFunc(onFix) {
+        ::debug("_onUBloxNavMsgFunc", "LocationDriver");
         // A valid timestamp will surely be greater than this value (01.01.2021)
         const LD_VALID_TS = 1609459200;
 
         return function(payload) {
             local parsed = UbxMsgParser[UBX_MSG_PARSER_CLASS_MSG_ID.NAV_PVT](payload);
-
 
             if (parsed.error != null) {
                 // NOTE: This may be printed as binary data
@@ -5738,16 +6170,48 @@ class LocationDriver {
 
             // Check fixtype
             if (parsed.fixType >= LD_UBLOX_FIX_TYPE.FIX_3D) {
-                local accuracy = _getUBloxAccuracy(parsed.hAcc);
+                local velN = parsed.velN
+                local velE = parsed.velE
+                local velD = parsed.velD
+                local hAcc = _getUBloxAccuracy(parsed.hAcc)
+                local vAcc = _getUBloxAccuracy(parsed.vAcc)
+                local tAcc = _getUBloxAccuracy(parsed.tAcc)
+                local sAcc = _getUBloxAccuracy(parsed.sAcc)
+                local headAcc = _getUBloxAccuracy(parsed.headAcc)
 
-                if (accuracy <= LD_GNSS_ACCURACY) {
+                if (hAcc <= LD_GNSS_ACCURACY) {
+                    ::debug("velN: " + velN, "LocationDriver");
+                    ::debug("velE: " + velE, "LocationDriver");
+                    ::debug("velD: " + velD, "LocationDriver");
+                    ::debug("height: " + parsed.height, "LocationDriver");
+                    ::debug("gSpeed: " + parsed.gSpeed, "LocationDriver");
+                    ::debug("hMSL: " + parsed.hMSL, "LocationDriver");
+                    ::debug("headMot: " + parsed.headMot, "LocationDriver");
+                    ::debug("headVeh: " + parsed.headVeh, "LocationDriver");
+                    ::debug("hAcc: " + hAcc, "LocationDriver");
+                    ::debug("vAcc: " + vAcc, "LocationDriver");
+                    ::debug("tAcc: " + tAcc, "LocationDriver");
+                    ::debug("sAcc: " + sAcc, "LocationDriver");
+                    ::debug("headAcc: " + headAcc, "LocationDriver");
                     onFix({
                         // If we don't have the valid time, we take it from the location data
                         "timestamp": time() > LD_VALID_TS ? time() : _dateToTimestamp(parsed),
                         "type": "gnss",
-                        "accuracy": accuracy,
+                        "accuracy": hAcc,
                         "longitude": UbxMsgParser.toDecimalDegreeString(parsed.lon).tofloat(),
-                        "latitude": UbxMsgParser.toDecimalDegreeString(parsed.lat).tofloat()
+                        "latitude": UbxMsgParser.toDecimalDegreeString(parsed.lat).tofloat(),
+                        "altitude": parsed.height / 1000.0, // mm to m
+                        "groundSpeed": parsed.gSpeed / 1000.0, // mm/s to m/s
+                        "velocity": math.sqrt(velN*velN + velE*velE + velD*velD) / 1000.0, // mm/s to m/s
+                        "velocityVert": -velD / 1000.0, // mm/s to m/s
+                        "altMsl": parsed.hMSL / 1000.0, // mm to m
+                        "headingMotion": UbxMsgParser.toDecimalDegreeString(parsed.headMot).tofloat(),
+                        "headingVehicle": UbxMsgParser.toDecimalDegreeString(parsed.headVeh).tofloat(),
+                        "accHoriz": hAcc, // mm to m
+                        "accVert": vAcc,
+                        "accTime": tAcc / 1000.0,
+                        "accSpeed": sAcc,
+                        "accHeading": headAcc
                     });
                 }
             }
@@ -6179,6 +6643,7 @@ class Application {
             local cfgManager = CfgManager([locationMon, motionMon, dataProc, simUpdater]);
             // Start Cfg Manager
             cfgManager.start();
+            esp._init();
         }.bindenv(this))
         .fail(function(err) {
             ::error("Error during initialization: " + err);
@@ -6312,6 +6777,8 @@ rm <- null;
 
 // LED indication
 ledIndication <- null;
+
+esp <- ESP32Driver(HW_ESP_POWER_EN_PIN, HW_ESP_UART);
 
 // Callback to be called by Production Manager if it allows to run the main application
 local startApp = function() {
