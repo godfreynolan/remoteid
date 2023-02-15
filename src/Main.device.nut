@@ -2786,13 +2786,15 @@ class ESP32Driver {
         }
 
         if (cmd) {
-            ::debug(format("Sending %s cmd..", cmd), "ESP32Driver");
+            ::debug(format("Sending cmd: %s", cmd), "ESP32Driver");
             _serial.write(cmd + "\r\n");
+        } else {
+            ::debug("cmd is null, waiting for ready response", "ESP32Driver");
         }
 
         return _waitForData(validator)
         .then(function(reply) {
-            cmd && ::debug(format("Reply for %s cmd received", cmd), "ESP32Driver");
+            cmd && ::debug(format("Reply received: %s", reply), "ESP32Driver");
             return replyHandler ? replyHandler(reply) : reply;
         }.bindenv(this));
     }
@@ -2812,8 +2814,10 @@ class ESP32Driver {
      */
     function _communicateStream(cmd, streamValidator, replyStreamHandler) {
         if (cmd) {
-            ::debug(format("Sending %s cmd..", cmd), "ESP32Driver");
+            ::debug(format("Sending stream cmd: %s", cmd), "ESP32Driver");
             _serial.write(cmd + "\r\n");
+        } else {
+            ::debug("Stream cmd is null, waiting for ready response", "ESP32Driver");
         }
 
         local result = null;
@@ -2825,7 +2829,7 @@ class ESP32Driver {
 
         return _waitForData(validator, false)
         .then(function(reply) {
-            cmd && ::debug(format("Reply for %s cmd received", cmd), "ESP32Driver");
+            cmd && ::debug(format("Stream reply received: %s", reply), "ESP32Driver");
             return result;
         }.bindenv(this));
     }
@@ -3019,7 +3023,7 @@ class ESP32Driver {
                 !accumulateData && (data = "");
 
                 if (timeElapsed >= ESP32_WAIT_DATA_TIMEOUT) {
-                    return reject("Timeout waiting for the expected data or an acknowledge");
+                    return resolve("Timeout waiting for the expected data or an acknowledge, continuing anyway");
                 }
 
                 if (accumulateData && dataLen >= ESP32_MAX_DATA_LEN) {
