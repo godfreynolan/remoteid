@@ -47,7 +47,6 @@ const APP_VERSION = "3.1.2-remoteid";
 enum APP_RM_MSG_NAME {
     DATA = "data",
     GNSS_ASSIST = "gnssAssist",
-    LOCATION_CELL_WIFI = "locationCellAndWiFi",
     CFG = "cfg"
 }
 
@@ -2037,372 +2036,6 @@ class CustomReplayMessenger extends ReplayMessenger {
 }
 
 
-// Required BG96/95 AT Commands
-enum AT_COMMAND {
-    // Query the information of neighbour cells (Detailed information of base station)
-    GET_QENG  = "AT+QENG=\"neighbourcell\"",
-    // Query the information of serving cell (Detailed information of base station)
-    GET_QENG_SERV_CELL  = "AT+QENG=\"servingcell\""
-}
-
-// Class to obtain cell towers info from BG96/95 modems.
-// This code uses unofficial impOS features
-// and is based on an unofficial example provided by Twilio
-// Utilizes the following AT Commands:
-// - QuecCell Commands:
-//   - AT+QENG Switch on/off Engineering Mode
-class BG9xCellInfo {
-
-    /**
-    * Get the network registration information from BG96/95
-    *
-    * @return {Table} The network registration information, or null on error.
-    * Table fields include:
-    * "radioType"                   - The mobile radio type: "gsm" or "lte"
-    * "cellTowers"                  - Array of tables
-    *     cellTowers[0]             - Table with information about the connected tower
-    *         "locationAreaCode"    - Integer of the location area code  [0, 65535]
-    *         "cellId"              - Integer cell ID
-    *         "mobileCountryCode"   - Mobile country code string
-    *         "mobileNetworkCode"   - Mobile network code string
-    *     cellTowers[1 .. x]        - Table with information about the neighbor towers
-    *                                 (optional)
-    *         "locationAreaCode"    - Integer location area code [0, 65535]
-    *         "cellId"              - Integer cell ID
-    *         "mobileCountryCode"   - Mobile country code string
-    *         "mobileNetworkCode"   - Mobile network code string
-    *         "signalStrength"      - Signal strength string
-    */
-    function scanCellTowers() {
-        local data = {
-            "radioType": null,
-            "cellTowers": []
-        };
-
-        ::debug("Scanning cell towers..", "BG9xCellInfo");
-
-        try {
-            local qengCmdResp = _writeAndParseAT(AT_COMMAND.GET_QENG_SERV_CELL);
-            if ("error" in qengCmdResp) {
-                throw "AT+QENG serving cell command returned error: " + qengCmdResp.error;
-            }
-
-            local srvCellRadioType = _qengExtractRadioType(qengCmdResp.data);
-
-            switch (srvCellRadioType) {
-                // This type is used by both BG96/95 modem
-                case "GSM":
-                    data.radioType = "gsm";
-                    // +QENG:
-                    // "servingscell",<state>,"GSM",<mcc>,
-                    // <mnc>,<lac>,<cellid>,<bsic>,<arfcn>,<band>,<rxlev>,<txp>,
-                    // <rla>,<drx>,<c1>,<c2>,<gprs>,<tch>,<ts>,<ta>,<maio>,<hsn>,<rxlevsub>,
-                    // <rxlevfull>,<rxqualsub>,<rxqualfull>,<voicecodec>
-                    data.cellTowers.append(_qengExtractServingCellGSM(qengCmdResp.data));
-                    // Neighbor towers
-                    // +QENG:
-                    // "neighbourcell","GSM",<mcc>,<mnc>,<lac>,<cellid>,<bsic>,<arfcn>,
-                    // <rxlev>,<c1>,<c2>,<c31>,<c32>
-                    qengCmdResp = _writeAndParseATMultiline(AT_COMMAND.GET_QENG);
-                    if ("error" in qengCmdResp) {
-                        ::error("AT+QENG command returned error: " + qengCmdResp.error, "BG9xCellInfo");
-                    } else {
-                        data.cellTowers.extend(_qengExtractTowersInfo(qengCmdResp.data, srvCellRadioType));
-                    }
-                    break;
-                // These types are used by BG96 modem
-                case "CAT-M":
-                case "CAT-NB":
-                case "LTE":
-                // These types are used by BG95 modem
-                case "eMTC":
-                case "NBIoT":
-                    data.radioType = "lte";
-                    data.cellTowers.append(_qengExtractServingCellLTE(qengCmdResp.data));
-                    // Neighbor towers parameters not correspond google API
-                    // +QENG:
-                    // "servingcell",<state>,"LTE",<is_tdd>,<mcc>,<mnc>,<cellid>,
-                    // <pcid>,<earfcn>,<freq_band_ind>,
-                    // <ul_bandwidth>,<d_bandwidth>,<tac>,<rsrp>,<rsrq>,<rssi>,<sinr>,<srxlev>
-                    // +QENG: "neighbourcell intra”,"LTE",<earfcn>,<pcid>,<rsrq>,<rsrp>,<rssi>,<sinr>
-                    // ,<srxlev>,<cell_resel_priority>,<s_non_intra_search>,<thresh_serving_low>,
-                    // <s_intra_search>
-                    // https://developers.google.com/maps/documentation/geolocation/overview#cell_tower_object
-                    // Location is determined by one tower in this case
-                    break;
-                default:
-                    throw "Unknown radio type: " + srvCellRadioType;
-            }
-        } catch (err) {
-            ::error("Scanning cell towers error: " + err, "BG9xCellInfo");
-            return null;
-        }
-
-        ::debug("Scanned items: " + data.len(), "BG9xCellInfo");
-
-        return data;
-    }
-
-    // -------------------- PRIVATE METHODS -------------------- //
-
-    /**
-     * Send the specified AT Command, parse a response.
-     * Return table with the parsed response.
-     */
-    function _writeAndParseAT(cmd) {
-        const BG9XCI_FLUSH_TIMEOUT = 2;
-
-        // This helps to avoid "Command in progress" error in some cases
-        server.flush(BG9XCI_FLUSH_TIMEOUT);
-        local resp = _writeATCommand(cmd);
-        return _parseATResp(resp);
-    }
-
-    /**
-     * Send the specified AT Command, parse a multiline response.
-     * Return table with the parsed response.
-     */
-    function _writeAndParseATMultiline(cmd) {
-        local resp = _writeATCommand(cmd);
-        return _parseATRespMultiline(resp);
-    }
-
-    /**
-     * Send the specified AT Command to the modem.
-     * Return a string with response.
-     *
-     * This function uses unofficial impOS feature.
-     *
-     * This function blocks until the response is returned
-     */
-    function _writeATCommand(cmd) {
-        return imp.setquirk(0x75636feb, cmd);
-    }
-
-    /**
-     * Parse AT response and looks for "OK", error and response data.
-     * Returns table that may contain fields: "raw", "error", "data", "success"
-     */
-    function _parseATResp(resp) {
-        local parsed = {"raw" : resp};
-
-        try {
-            parsed.success <- (resp.find("OK") != null);
-
-            local start = resp.find(":");
-            (start != null) ? start+=2 : start = 0;
-
-            local newLine = resp.find("\n");
-            local end = (newLine != null) ? newLine : resp.len();
-
-            local data = resp.slice(start, end);
-
-            if (resp.find("Error") != null) {
-                parsed.error <- data;
-            } else {
-                parsed.data  <- data;
-            }
-        } catch(e) {
-            parsed.error <- "Error parsing AT response: " + e;
-        }
-
-        return parsed;
-    }
-
-    /**
-     * Parse multiline AT response and looks for "OK", error and response data.
-     * Returns table that may contain fields: "raw", "error",
-     * "data" (array of string), success.
-     */
-    function _parseATRespMultiline(resp) {
-        local parsed = {"raw" : resp};
-        local data = [];
-        local lines;
-
-        try {
-            parsed.success <- (resp.find("OK") != null);
-            lines = split(resp, "\n");
-
-            foreach (line in lines) {
-                if (line == "OK") {
-                    continue;
-                }
-
-                local start = line.find(":");
-                (start != null) ? start +=2 : start = 0;
-
-                local dataline = line.slice(start);
-                data.push(dataline);
-
-            }
-
-            if (resp.find("Error") != null) {
-                parsed.error <- data;
-            } else {
-                parsed.data  <- data;
-            }
-        } catch(e) {
-            parsed.error <- "Error parsing AT response: " + e;
-        }
-
-        return parsed;
-    }
-
-    /**
-     * Extract mobile country and network codes, location area code,
-     * cell ID, signal strength from dataLines parameter.
-     * Return the info in array.
-     */
-    function _qengExtractTowersInfo(dataLines, checkRadioType) {
-        try {
-            local towers = [];
-
-            foreach (line in dataLines) {
-                local splitted = split(line, ",");
-
-                if (splitted.len() < 9) {
-                    continue;
-                }
-
-                local radioType = splitted[1];
-                radioType = split(radioType, "\"")[0];
-
-                if (radioType != checkRadioType) {
-                    continue;
-                }
-
-                local mcc = splitted[2];
-                local mnc = splitted[3];
-                local lac = splitted[4];
-                local ci = splitted[5];
-                local ss = splitted[8];
-
-                lac = utilities.hexStringToInteger(lac);
-                ci = utilities.hexStringToInteger(ci);
-
-                towers.append({
-                    "mobileCountryCode" : mcc,
-                    "mobileNetworkCode" : mnc,
-                    "locationAreaCode" : lac,
-                    "cellId" : ci,
-                    "signalStrength" : ss
-                });
-            }
-
-            return towers;
-        } catch (err) {
-            throw "Couldn't parse neighbour cells (GET_QENG cmd): " + err;
-        }
-    }
-
-    /**
-     * Extract radio type from the data parameter.
-     * Return the info in a sring.
-     */
-    function _qengExtractRadioType(data) {
-        // +QENG: "servingcell","NOCONN","GSM",250,99,DC51,B919,26,50,-,-73,255,255,0,38,38,1,-,-,-,-,-,-,-,-,-,"-"
-        // +QENG: "servingcell","CONNECT","CAT-M","FDD",262,03,2FAA03,187,6200,20,3,3,2AFB,-105,-11,-76,10,-
-        try {
-            local splitted = split(data, ",");
-            local radioType = splitted[2];
-            radioType = split(radioType, "\"")[0];
-
-            return radioType;
-        } catch (err) {
-            throw "Couldn't parse radio type (GET_QENG cmd): " + err;
-        }
-    }
-
-     /**
-     * Extract mobile country and network codes, location area code,
-     * cell ID, signal strength from the data parameter. (GSM networks)
-     * Return the info in a table.
-     */
-    function _qengExtractServingCellGSM(data) {
-        // +QENG: "servingcell","NOCONN","GSM",250,99,DC51,B919,26,50,-,-73,255,255,0,38,38,1,-,-,-,-,-,-,-,-,-,"-"
-        try {
-            local splitted = split(data, ",");
-
-            local mcc = splitted[3];
-            local mnc = splitted[4];
-            local lac = splitted[5];
-            local ci = splitted[6];
-            local ss = splitted[10];
-            lac = utilities.hexStringToInteger(lac);
-            ci = utilities.hexStringToInteger(ci);
-
-            return {
-                "mobileCountryCode" : mcc,
-                "mobileNetworkCode" : mnc,
-                "locationAreaCode" : lac,
-                "cellId" : ci,
-                "signalStrength" : ss
-            };
-        } catch (err) {
-            throw "Couldn't parse serving cell (GET_QENG_SERV_CELL cmd): " + err;
-        }
-    }
-
-    /**
-     * Extract mobile country and network codes, location area code,
-     * cell ID, signal strength from the data parameter. (LTE networks)
-     * Return the info in a table.
-     */
-    function _qengExtractServingCellLTE(data) {
-        // +QENG: "servingcell","CONNECT","CAT-M","FDD",262,03,2FAA03,187,6200,20,3,3,2AFB,-105,-11,-76,10,-
-        try {
-            local splitted = split(data, ",");
-
-            local mcc = splitted[4];
-            local mnc = splitted[5];
-            local tac = splitted[12];
-            local ci = splitted[6];
-            local ss = splitted[15];
-            tac = utilities.hexStringToInteger(tac);
-            ci = utilities.hexStringToInteger(ci);
-
-            return {
-                "mobileCountryCode" : mcc,
-                "mobileNetworkCode" : mnc,
-                "locationAreaCode" : tac,
-                "cellId" : ci,
-                "signalStrength" : ss
-            };
-        } catch (err) {
-            throw "Couldn't parse serving cell (GET_QENG_SERV_CELL cmd): " + err;
-        }
-    }
-}
-
-
-// Enum for BLE scan enable
-enum ESP32_BLE_SCAN {
-    DISABLE = 0,
-    ENABLE = 1
-};
-
-// Enum for BLE scan type
-enum ESP32_BLE_SCAN_TYPE {
-    PASSIVE = 0,
-    ACTIVE = 1
-};
-
-// Enum for own address type
-enum ESP32_BLE_OWN_ADDR_TYPE {
-    PUBLIC = 0,
-    RANDOM = 1,
-    RPA_PUBLIC = 2,
-    RPA_RANDOM = 3
-};
-
-// Enum for filter policy
-enum ESP32_BLE_FILTER_POLICY {
-    ALLOW_ALL = 0,
-    ALLOW_ONLY_WLST = 1,
-    ALLOW_UND_RPA_DIR = 2,
-    ALLOW_WLIST_RPA_DIR = 3
-};
-
 // Enum for BLE roles
 enum ESP32_BLE_ROLE {
     DEINIT = 0,
@@ -2416,51 +2049,6 @@ enum ESP32_WIFI_MODE {
     STATION = 1,
     SOFT_AP = 2,
     SOFT_AP_AND_STATION = 3
-};
-
-// Enum for WiFi scan print mask info
-enum ESP32_WIFI_SCAN_PRINT_MASK {
-    SHOW_ECN = 0x01,
-    SHOW_SSID = 0x02,
-    SHOW_RSSI = 0x04,
-    SHOW_MAC = 0x08,
-    SHOW_CHANNEL = 0x10,
-    SHOW_FREQ_OFFS = 0x20,
-    SHOW_FREQ_VAL = 0x40,
-    SHOW_PAIRWISE_CIPHER = 0x80,
-    SHOW_GROUP_CIPHER = 0x100,
-    SHOW_BGN = 0x200,
-    SHOW_WPS = 0x300
-};
-
-// Enum for WiFi encryption method
-enum ESP32_ECN_METHOD {
-    OPEN = 0,
-    WEP = 1,
-    WPA_PSK = 2,
-    WPA2_PSK = 3,
-    WPA_WPA2_PSK = 4,
-    WPA_ENTERPRISE = 5,
-    WPA3_PSK = 6,
-    WPA2_WPA3_PSK = 7
-};
-
-// Enum for WiFi network parameters order
-enum ESP32_WIFI_PARAM_ORDER {
-    ECN = 0,
-    SSID = 1,
-    RSSI = 2,
-    MAC = 3,
-    CHANNEL = 4
-};
-
-// Enum for BLE scan result parameters order
-enum ESP32_BLE_PARAM_ORDER {
-    ADDR = 0,
-    RSSI = 1,
-    ADV_DATA = 2,
-    SCAN_RSP_DATA = 3,
-    ADDR_TYPE = 4
 };
 
 // Enum power state
@@ -2489,19 +2077,6 @@ const ESP32_WAIT_DATA_TIMEOUT = 8;
 const ESP32_MAX_DATA_LEN = 2048;
 // Automatic switch off delay, in seconds
 const ESP32_SWITCH_OFF_DELAY = 10;
-
-// Scan interval. It should be more than or equal to the value of <scan_window>.
-// The range of this parameter is [0x0004,0x4000].
-// The scan interval equals this parameter multiplied by 0.625 ms,
-// so the range for the actual scan interval is [2.5,10240] ms.
-const ESP32_BLE_SCAN_INTERVAL = 83;
-// Scan window. It should be less than or equal to the value of <scan_interval>.
-// The range of this parameter is [0x0004,0x4000].
-// The scan window equals this parameter multiplied by 0.625 ms,
-// so the range for the actual scan window is [2.5,10240] ms.
-const ESP32_BLE_SCAN_WINDOW = 83;
-// BLE advertisements scan period, in seconds
-const ESP32_BLE_SCAN_PERIOD = 6;
 
 const BLE_ADV_DATA_PREFIX = "1E16FAFF0D";
 const BLE_ADV_PROTO_VER = "2";
@@ -2644,8 +2219,6 @@ class ESP32Driver {
     _switchedOn = false;
     // True if the ESP32 board is initialized, false otherwise
     _initialized = false;
-    // Timer for automatic switch-off of the ESP32 board when idle
-    _switchOffTimer = null;
 
     readyMsgValidator = @(data, _) data.find("\r\nready\r\n") != null;
     okValidator = @(data, _) data.find("\r\nOK\r\n") != null;
@@ -2692,138 +2265,6 @@ class ESP32Driver {
     }
 
     /**
-     * Scan WiFi networks.
-     * NOTE: Parallel requests (2xWiFi or WiFi+BLE scanning) are not allowed
-     *
-     * @return {Promise} that:
-     * - resolves with an array of WiFi networks scanned if the operation succeeded
-     *   Each element of the array is a table with the following fields:
-     *      "ssid"      : {string}  - SSID (network name).
-     *      "bssid"     : {string}  - BSSID (access point’s MAC address), in 0123456789ab format.
-     *      "channel"   : {integer} - Channel number: 1-13 (2.4GHz).
-     *      "rssi"      : {integer} - RSSI (signal strength).
-     *      "open"      : {bool}    - Whether the network is open (password-free).
-     * - rejects if the operation failed
-     */
-    function scanWiFiNetworks() {
-        _switchOffTimer && imp.cancelwakeup(_switchOffTimer);
-
-        return _init()
-        .then(function(_) {
-            ::debug("Scanning WiFi networks..", "ESP32Driver");
-
-            // The string expected to appear in the reply
-            local validationString = "\r\nOK\r\n";
-            // The tail of the previously received data chunk(s).
-            // Needed to make sure we won't miss the validation substring in the
-            // reply in case when its parts are in different reply data chunks
-            local prevTail = "";
-
-            local streamValidator = function(dataChunk, _) {
-                local data = prevTail + dataChunk;
-                local tailLen = data.len() - validationString.len();
-                prevTail = tailLen > 0 ? data.slice(tailLen) : data;
-
-                return data.find(validationString) != null;
-            }.bindenv(this);
-
-            // The result array of parsed WiFi networks
-            local wifis = [];
-            // The unparsed tail (if any) of the previously received data chunk(s).
-            // Needed to make sure we won't lose some results in the reply in case
-            // when some parsable units are in different reply data chunks
-            local unparsedTail = "";
-
-            local replyStreamHandler = function(dataChunk) {
-                unparsedTail = _parseWifiNetworks(unparsedTail + dataChunk, wifis);
-                return wifis;
-            }.bindenv(this);
-
-            // Send "List Available APs" cmd and parse the result
-            return _communicateStream("AT+CWLAP", streamValidator, replyStreamHandler);
-        }.bindenv(this))
-        .then(function(wifis) {
-            ::debug("Scanning of WiFi networks finished successfully. Scanned items: " + wifis.len(), "ESP32Driver");
-            _switchOffTimer = imp.wakeup(ESP32_SWITCH_OFF_DELAY, _switchOff.bindenv(this));
-            return wifis;
-        }.bindenv(this), function(err) {
-            _switchOffTimer = imp.wakeup(ESP32_SWITCH_OFF_DELAY, _switchOff.bindenv(this));
-            throw err;
-        }.bindenv(this));
-    }
-
-    /**
-     * Scan BLE advertisements.
-     * NOTE: Parallel requests (2xBLE or BLE+WiFi scanning) are not allowed
-     *
-     * @return {Promise} that:
-     * - resolves with an array of scanned BLE advertisements if the operation succeeded
-     *   Each element of the array is a table with the following fields:
-     *     "address"  : {string}  - BLE address.
-     *     "rssi"     : {integer} - RSSI (signal strength).
-     *     "advData"  : {blob} - Advertising data.
-     *     "addrType" : {integer} - Address type: 0 - public, 1 - random.
-     * - rejects if the operation failed
-     */
-    function scanBLEAdverts() {
-        _switchOffTimer && imp.cancelwakeup(_switchOffTimer);
-
-        return _init()
-        .then(function(_) {
-            ::debug("Scanning BLE advertisements..", "ESP32Driver");
-
-            local bleScanCmd = format("AT+BLESCAN=%d,%d", ESP32_BLE_SCAN.ENABLE, ESP32_BLE_SCAN_PERIOD);
-
-            // The string expected to appear in the reply
-            local validationString = "\r\nOK\r\n";
-            // The tail of the previously received data chunk(s).
-            // Needed to make sure we won't miss the validation substring in the
-            // reply in case when its parts are in different reply data chunks
-            local prevTail = "";
-            // True if the validation string has been found
-            local stringFound = false;
-
-            local streamValidator = function(dataChunk, timeElapsed) {
-                if (!stringFound) {
-                    local data = prevTail + dataChunk;
-                    stringFound = data.find(validationString) != null;
-
-                    local tailLen = data.len() - validationString.len();
-                    prevTail = tailLen > 0 ? data.slice(tailLen) : data;
-                }
-
-                return stringFound && timeElapsed >= ESP32_BLE_SCAN_PERIOD;
-            }.bindenv(this);
-
-            // The result array of parsed BLE adverts
-            local adverts = [];
-            // The unparsed tail (if any) of the previously received data chunk(s).
-            // Needed to make sure we won't lose some results in the reply in case
-            // when some parsable units are in different reply data chunks
-            local unparsedTail = "";
-
-            local replyStreamHandler = function(dataChunk) {
-                unparsedTail = _parseBLEAdverts(unparsedTail + dataChunk, adverts);
-                return adverts;
-            }.bindenv(this);
-
-            // Send "Enable Bluetooth LE Scanning" cmd and parse the result
-            return _communicateStream(bleScanCmd, streamValidator, replyStreamHandler);
-        }.bindenv(this))
-        .then(function(adverts) {
-            ::debug("Scanning of BLE advertisements finished successfully. Scanned items: " + adverts.len(), "ESP32Driver");
-            _switchOffTimer = imp.wakeup(ESP32_SWITCH_OFF_DELAY, _switchOff.bindenv(this));
-
-            // NOTE: It's assumed that MACs are in lower case.
-            // Probably, in the future, it's better to explicilty convert them to lower case here
-            return adverts;
-        }.bindenv(this), function(err) {
-            _switchOffTimer = imp.wakeup(ESP32_SWITCH_OFF_DELAY, _switchOff.bindenv(this));
-            throw err;
-        }.bindenv(this));
-    }
-
-    /**
      * Init and configure ESP32.
      *
      * @return {Promise} that:
@@ -2838,11 +2279,6 @@ class ESP32Driver {
             return Promise.resolve(null);
         }
 
-        // Compare BLE scan period and wait data timeout
-        if (ESP32_BLE_SCAN_PERIOD > ESP32_WAIT_DATA_TIMEOUT) {
-            ::info("BLE scan period is greater than wait data period!", "ESP32Driver");
-        }
-
         ::debug("Starting initialization", "ESP32Driver");
 
         // Just in case, check if it's already switched ON and switch OFF to start the initialization process from scratch
@@ -2853,19 +2289,6 @@ class ESP32Driver {
 
         _switchOn();
 
-        local cmdSetPrintMask = format("AT+CWLAPOPT=0,%d",
-                                       ESP32_WIFI_SCAN_PRINT_MASK.SHOW_SSID |
-                                       ESP32_WIFI_SCAN_PRINT_MASK.SHOW_MAC |
-                                       ESP32_WIFI_SCAN_PRINT_MASK.SHOW_CHANNEL |
-                                       ESP32_WIFI_SCAN_PRINT_MASK.SHOW_RSSI |
-                                       ESP32_WIFI_SCAN_PRINT_MASK.SHOW_ECN);
-        local cmdSetBLEScanParam = format("AT+BLESCANPARAM=%d,%d,%d,%d,%d",
-                                          ESP32_BLE_SCAN_TYPE.PASSIVE,
-                                          ESP32_BLE_OWN_ADDR_TYPE.PUBLIC,
-                                          ESP32_BLE_FILTER_POLICY.ALLOW_ALL,
-                                          ESP32_BLE_SCAN_INTERVAL,
-                                          ESP32_BLE_SCAN_WINDOW);
-
         // Functions that return promises which will be executed serially
         local promiseFuncs = [
             _communicate(null, readyMsgValidator),
@@ -2873,7 +2296,7 @@ class ESP32Driver {
             _communicate(null, readyMsgValidator),
             _communicate(format("AT+CWMODE=%d", ESP32_WIFI_MODE.DISABLE), okValidator),
             _communicate(format("AT+BLEINIT=%d", ESP32_BLE_ROLE.SERVER), okValidator),
-            _communicate("AT+BLEADVPARAM=32,32,3,0,7,0", okValidator),
+            _communicate("AT+BLEADVPARAM=32,1600,3,0,7,0", okValidator),
             _communicate("AT+BLEADVSTART", okValidator)
         ];
 
@@ -2881,14 +2304,14 @@ class ESP32Driver {
         .then(function(_) {
             ::debug("Initialization complete", "ESP32Driver");
             _initialized = true;
+            advStaticData();
         }.bindenv(this), function(err) {
             throw "Initialization failure: " + err;
         }.bindenv(this));
     }
 
-    function sequenceAdv(location) {
-        if (_initialized) ::debug("Starting sequenceAdv with location: " + location, "ESP32Driver");
-        else ::debug("BLE not yet initialized, skipping sequenceAdv", "ESP32Driver");
+    function advStaticData() {
+        ::debug("Starting advStaticData", "ESP32Driver");
 
         // Functions that return promises which will be executed serially
         local promiseFuncs = [
@@ -2901,22 +2324,6 @@ class ESP32Driver {
                 BLE_ADV_BASIC_ID_TYPE.SPECIFIC_SESSION_ID, // idType
                 BLE_ADV_UA_TYPE.HELI_MULTIROTOR, // uaType
                 "FD3454B778E565C24B70" // idText
-            )),
-            updateAdv(generateLocationVectorMsg(
-                BLE_ADV_OP_STATUS.AIRBORNE, // status
-                BLE_ADV_HEIGHT_TYPE.AGL, // heightType
-                location.headingVehicle, // trackDir
-                location.groundSpeed, // speed
-                location.velocityVert, // vertSpeed
-                location.latitude, // lat
-                location.longitude, // lon
-                0, // pressAlt
-                location.altitude, // geoAlt
-                location.altitude, // height
-                getVertAcc(location.accVert), // vertAcc
-                getHorizAcc(location.accHoriz), // horizAcc
-                getVertAcc(location.accVert), // altAcc
-                getSpeedAcc(location.accSpeed) // spdAcc
             )),
             updateAdv(generateAuthMsgPg0(
                 BLE_ADV_AUTH_TYPE.UAS_ID_SIG, // authType
@@ -2938,8 +2345,8 @@ class ESP32Driver {
             updateAdv(generateSystemMsg(
                 BLE_ADV_OP_LOC_SRC.TAKEOFF, // opLocSrc
                 BLE_ADV_UA_CLASS_TYPE.EUROPEAN_UNION, // uaClassType
-                location.latitude, // opLat
-                location.longitude, // opLon
+                0, // opLat
+                0, // opLon
                 1, // areaCount
                 0, // areaRadius
                 0, // areaCeiling
@@ -2951,11 +2358,44 @@ class ESP32Driver {
             updateAdv(generateOperatorIdMsg("FIN87astrdge12k8"))
         ];
 
+        Promise.serial(promiseFuncs)
+        .then(function(_) {
+            ::debug("advStaticData complete", "ESP32Driver");
+            imp.wakeup(3.0, advStaticData.bindenv(this));
+        }.bindenv(this), function(err) {
+            throw "advStaticData failure: " + err;
+        }.bindenv(this));
+    }
+
+    function advDynamicData(location) {
+        if (_initialized) ::debug("Starting advDynamicData with location: " + location, "ESP32Driver");
+        else ::debug("BLE not yet initialized, skipping advDynamicData", "ESP32Driver");
+
+        // Functions that return promises which will be executed serially
+        local promiseFuncs = [
+            updateAdv(generateLocationVectorMsg(
+                BLE_ADV_OP_STATUS.AIRBORNE, // status
+                BLE_ADV_HEIGHT_TYPE.AGL, // heightType
+                location.headingVehicle, // trackDir
+                location.groundSpeed, // speed
+                location.velocityVert, // vertSpeed
+                location.latitude, // lat
+                location.longitude, // lon
+                0, // pressAlt
+                location.altitude, // geoAlt
+                location.altitude, // height
+                getVertAcc(location.accVert), // vertAcc
+                getHorizAcc(location.accHoriz), // horizAcc
+                getVertAcc(location.accVert), // altAcc
+                getSpeedAcc(location.accSpeed) // spdAcc
+            ))
+        ];
+
         return Promise.serial(promiseFuncs)
         .then(function(_) {
-            ::debug("sequenceAdv complete", "ESP32Driver");
+            ::debug("advDynamicData complete", "ESP32Driver");
         }.bindenv(this), function(err) {
-            throw "sequenceAdv failure: " + err;
+            throw "advDynamicData failure: " + err;
         }.bindenv(this));
     }
 
@@ -3301,121 +2741,6 @@ class ESP32Driver {
     }
 
     /**
-     * Parse the data returned by the AT+CWLAP (List Available APs) command
-     *
-     * @param {string} data - String with a data chunk of the reply to the AT+CWLAP command
-     * @param {array} dstArray - Array for saving parsed results
-     *  Each element of the array is a table with the following fields:
-     *     "ssid"      : {string}  - SSID (network name).
-     *     "bssid"     : {string}  - BSSID (access point’s MAC address), in 0123456789ab format.
-     *     "channel"   : {integer} - Channel number: 1-13 (2.4GHz).
-     *     "rssi"      : {integer} - RSSI (signal strength).
-     *     "open"      : {bool}    - Whether the network is open (password-free).
-     *
-     * @return {string} Unparsed tail of the data chunk or an empty string
-     * An exception may be thrown in case of an error.
-     */
-    function _parseWifiNetworks(data, dstArray) {
-        // The data should look like the following:
-        // AT+CWLAP
-        // +CWLAP:(3,"Ger",-64,"f1:b2:d4:88:16:32",8)
-        // +CWLAP:(3,"TP-Link_256",-80,"bb:ae:76:8d:2c:de",10)
-        //
-        // OK
-
-        // Sub-expressions of the regular expression for parsing AT+CWLAP response
-        const ESP32_CWLAP_PREFIX  = @"\+CWLAP:";
-        const ESP32_CWLAP_ECN     = @"\d";
-        const ESP32_CWLAP_SSID    = @".{0,32}";
-        const ESP32_CWLAP_RSSI    = @"-?\d{1,3}";
-        const ESP32_CWLAP_MAC     = @"(?:\x\x:){5}\x\x";
-        // Only WiFi 2.4GHz (5GHz channels can be 100+)
-        const ESP32_CWLAP_CHANNEL = @"\d{1,2}";
-
-        // NOTE: Due to the known issues of regexp (see the electric imp docs), WiFi networks with SSID that contains quotation mark(s) (")
-        // will not be recognized by the regular expression and, therefore, will not be in the result list of scanned networks
-        local regex = regexp(format(@"^%s\((%s),""(%s)"",(%s),""(%s)"",(%s)\)$",
-                                    ESP32_CWLAP_PREFIX,
-                                    ESP32_CWLAP_ECN,
-                                    ESP32_CWLAP_SSID,
-                                    ESP32_CWLAP_RSSI,
-                                    ESP32_CWLAP_MAC,
-                                    ESP32_CWLAP_CHANNEL));
-
-        ::debug("Parsing the WiFi scan response..", "ESP32Driver");
-
-        try {
-            local dataRows = split(data, "\r\n");
-            local unparsedTail = "";
-
-            foreach (row in dataRows) {
-                local regexCapture = regex.capture(row);
-
-                if (regexCapture == null) {
-                    if (row != dataRows.top()) {
-                        continue;
-                    }
-
-                    local lastChar = data[data.len() - 1];
-                    if (lastChar != '\r' && lastChar != '\n') {
-                        unparsedTail = row;
-                    }
-
-                    break;
-                }
-
-                // The first capture is the full row. Let's remove it as we only need the parsed pieces of the row
-                regexCapture.remove(0);
-                // Convert the array of begin/end indexes to an array of substrings parsed out from the row
-                foreach (i, val in regexCapture) {
-                    regexCapture[i] = row.slice(val.begin, val.end);
-                }
-
-                local scannedWifi = {
-                    "ssid"   : regexCapture[ESP32_WIFI_PARAM_ORDER.SSID],
-                    "bssid"  : _removeColon(regexCapture[ESP32_WIFI_PARAM_ORDER.MAC]),
-                    "channel": regexCapture[ESP32_WIFI_PARAM_ORDER.CHANNEL].tointeger(),
-                    "rssi"   : regexCapture[ESP32_WIFI_PARAM_ORDER.RSSI].tointeger(),
-                    "open"   : regexCapture[ESP32_WIFI_PARAM_ORDER.ECN].tointeger() == ESP32_ECN_METHOD.OPEN
-                };
-
-                dstArray.push(scannedWifi);
-            }
-
-            return unparsedTail;
-        } catch (err) {
-            throw "WiFi networks parsing error: " + err;
-        }
-    }
-
-    /**
-     * Log the data returned by the AT+GMR (Check Version Information) command
-     *
-     * @param {string} data - String with a reply to the AT+GMR command
-     * An exception may be thrown in case of an error.
-     */
-    function _logVersionInfo(data) {
-        // The data should look like the following:
-        // AT version:2.2.0.0(c6fa6bf - ESP32 - Jul  2 2021 06:44:05)
-        // SDK version:v4.2.2-76-gefa6eca
-        // compile time(3a696ba):Jul  2 2021 11:54:43
-        // Bin version:2.2.0(WROOM-32)
-        //
-        // OK
-
-        ::debug("ESP AT software:", "ESP32Driver");
-
-        try {
-            local rows = split(data, "\r\n");
-            for (local i = 1; i < rows.len() - 1; i++) {
-                ::debug(rows[i], "ESP32Driver");
-            }
-        } catch (err) {
-            throw "AT+GMR cmd response parsing error: " + err;
-        }
-    }
-
-    /**
      * Wait for certain data to be received from the ESP32 board
      *
      * @param {function} validator - Function that gets reply data checks if the expected data has been fully received
@@ -3473,119 +2798,6 @@ class ESP32Driver {
 
             imp.wakeup(ESP32_DATA_CHECK_PERIOD, check);
         }.bindenv(this));
-    }
-
-    /**
-     * Remove all colon (:) chars from a string
-     *
-     * @param {string} str - A string
-     *
-     * @return {string} String with all colon chars removed
-     */
-    function _removeColon(str) {
-        local subStrings = split(str, ":");
-        local res = "";
-        foreach (subStr in subStrings) {
-            res += subStr;
-        }
-
-        return res;
-    }
-
-    /**
-     * Parse the data returned by the AT+BLESCAN command
-     *
-     * @param {string} data - String with a data chunk of the reply to the AT+BLESCAN command
-     * @param {array} dstArray - Array for saving parsed results. May contain previously saved results
-     *  Each element of the array is a table with the following fields:
-     *     "address"  : {string}  - BLE address.
-     *     "rssi"     : {integer} - RSSI (signal strength).
-     *     "advData"  : {blob} - Advertising data.
-     *     "addrType" : {integer} - Address type: 0 - public, 1 - random.
-     *
-     * @return {string} Unparsed tail of the data chunk or an empty string
-     * An exception may be thrown in case of an error.
-     */
-    function _parseBLEAdverts(data, dstArray) {
-        // The data should look like the following:
-        // AT+BLESCAN=1,5
-        // OK
-        // +BLESCAN:"6f:92:8a:04:e1:79",-89,1aff4c000215646be3e46e4e4e25ad0177a28f3df4bd00000000bf,,1
-        // +BLESCAN:"76:72:c3:3e:29:e4",-79,1bffffffbeac726addafa7044528b00b12f8f57e7d8200000000bb00,,1
-
-        // Sub-expressions of the regular expression for parsing AT+BLESCAN response
-        const ESP32_BLESCAN_PREFIX        = @"\+BLESCAN:";
-        const ESP32_BLESCAN_ADDR          = @"(?:\x\x:){5}\x\x";
-        const ESP32_BLESCAN_RSSI          = @"-?\d{1,3}";
-        const ESP32_BLESCAN_ADV_DATA      = @"(?:\x\x){0,31}";
-        const ESP32_BLESCAN_SCAN_RSP_DATA = @"(?:\x\x){0,31}";
-        const ESP32_BLESCAN_ADDR_TYPE     = @"\d";
-
-        local regex = regexp(format(@"^%s""(%s)"",(%s),(%s),(%s),(%s)$",
-                                    ESP32_BLESCAN_PREFIX,
-                                    ESP32_BLESCAN_ADDR,
-                                    ESP32_BLESCAN_RSSI,
-                                    ESP32_BLESCAN_ADV_DATA,
-                                    ESP32_BLESCAN_SCAN_RSP_DATA,
-                                    ESP32_BLESCAN_ADDR_TYPE));
-        ::debug("Parsing the BLE devices scan response..", "ESP32Driver");
-
-        try {
-            local dataRows = split(data, "\r\n");
-            local unparsedTail = "";
-
-            foreach (row in dataRows) {
-                local regexCapture = regex.capture(row);
-
-                if (regexCapture == null) {
-                    if (row != dataRows.top()) {
-                        continue;
-                    }
-
-                    local lastChar = data[data.len() - 1];
-                    if (lastChar != '\r' && lastChar != '\n') {
-                        unparsedTail = row;
-                    }
-
-                    break;
-                }
-
-                // The first capture is the full row. Let's remove it as we only need the parsed pieces of the row
-                regexCapture.remove(0);
-                // Convert the array of begin/end indexes to an array of substrings parsed out from the row
-                foreach (i, val in regexCapture) {
-                    regexCapture[i] = row.slice(val.begin, val.end);
-                }
-
-                local advDataStr = regexCapture[ESP32_BLE_PARAM_ORDER.ADV_DATA];
-                local resultAdvert = {
-                    "address" : _removeColon(regexCapture[ESP32_BLE_PARAM_ORDER.ADDR]),
-                    "rssi"    : regexCapture[ESP32_BLE_PARAM_ORDER.RSSI].tointeger(),
-                    "advData" : advDataStr.len() >= 2 ? utilities.hexStringToBlob(advDataStr) : blob(),
-                    "addrType": regexCapture[ESP32_BLE_PARAM_ORDER.ADDR_TYPE].tointeger()
-                };
-
-                local alreadyExists = false;
-
-                foreach (existingAdvert in dstArray) {
-                    if (existingAdvert.address == resultAdvert.address &&
-                        existingAdvert.advData.tostring() == resultAdvert.advData.tostring() &&
-                        existingAdvert.addrType == resultAdvert.addrType) {
-                        alreadyExists = true;
-                        existingAdvert.rssi = resultAdvert.rssi;
-                        break;
-                    }
-                }
-
-                if (!alreadyExists) {
-                    dstArray.push(resultAdvert);
-                }
-            }
-
-            return unparsedTail;
-        } catch (err) {
-            throw "BLE advertisements parsing error: " + err;
-        }
     }
 }
 
@@ -4611,7 +3823,8 @@ class LocationMonitor {
         updateCfg(cfg);
 
         // get current location
-        _readLocation();
+        // _readLocation();
+        _ld._getLocationContinuous();
 
         return Promise.resolve(null);
     }
@@ -4627,8 +3840,6 @@ class LocationMonitor {
      * - rejects if the operation failed
      */
     function updateCfg(cfg) {
-        // First configure BLE devices because next lines will likely start location obtaining
-        _updCfgBLEDevices(cfg);
         _updCfgGeneral(cfg);
         _updCfgGeofence(cfg);
 
@@ -4757,14 +3968,6 @@ class LocationMonitor {
         // - Do nothing (if periodic location reading is already running
         //   (and still should be) and the reading period hasn't been changed)
         _managePeriodicLocReading(readingPeriod != null);
-    }
-
-    function _updCfgBLEDevices(cfg) {
-        local bleDevicesCfg = getValFromTable(cfg, "locationTracking/bleDevices");
-        local enabled = getValFromTable(bleDevicesCfg, "enabled");
-        local knownBLEDevices = nullEmpty(getValsFromTable(bleDevicesCfg, ["generic", "iBeacon"]));
-
-        _ld.configureBLEDevices(enabled, knownBLEDevices);
     }
 
     function _updCfgGeofence(cfg) {
@@ -5698,24 +4901,6 @@ class LocationDriver {
     }
 
     /**
-     * Configure BLE devices
-     *
-     * @param {boolean | null} enabled - If true, enable BLE location. If null, ignored
-     * @param {table} [knownBLEDevices] - Known BLE devices (generic and iBeacon). If null, ignored
-     *                                    NOTE: This class only stores a reference to the object with BLE devices. If this object
-     *                                    is changed outside this class, this class will have the updated version of the object
-     */
-    function configureBLEDevices(enabled, knownBLEDevices = null) {
-        knownBLEDevices && (_knownBLEDevices = knownBLEDevices);
-
-        if (enabled && !_knownBLEDevices) {
-            throw "Known BLE devices must be specified to enable location using BLE devices";
-        }
-
-        (enabled != null) && (_bleDevicesEnabled = enabled);
-    }
-
-    /**
      * Obtain and return the current location
      * - First, try to get GNSS fix
      * - If no success, try to obtain location using cell towers info
@@ -5811,8 +4996,8 @@ class LocationDriver {
                     // Zero the fails counter, cancel the timeout timer, disable the u-blox, and resolve the promise
                     _gnssFailsCounter = 0;
                     imp.cancelwakeup(timeoutTimer);
-                    _disableUBlox();
-                    esp.sequenceAdv(location);
+                    // _disableUBlox();
+                    // esp.advDynamicData(location);
                     resolve(location);
                 }.bindenv(this);
 
@@ -5822,159 +5007,29 @@ class LocationDriver {
         }.bindenv(this));
     }
 
-    /**
-     * Obtain the current location using cell towers info and WiFi
-     *
-     * @return {Promise} that:
-     * - resolves with the current location if the operation succeeded
-     * - rejects with an error if the operation failed
-     */
-    function _getLocationCellTowersAndWiFi() {
-        ::debug("Getting location using cell towers and WiFi..", "LocationDriver");
+    function _getLocationContinuous() {
+        local ubxDriver = _initUblox();
+        ::debug("Switched ON the u-blox module", "LocationDriver");
 
-        cm.keepConnection("LocationDriver", true);
-
-        local scannedWifis = null;
-        local scannedTowers = null;
-        local locType = null;
-
-        // Run WiFi scanning in the background
-        local scanWifiPromise = esp.scanWiFiNetworks()
-        .then(function(wifis) {
-            scannedWifis = wifis.len() > 0 ? wifis : null;
-        }.bindenv(this), function(err) {
-            ::error("Couldn't scan WiFi networks: " + err, "LocationDriver");
-        }.bindenv(this));
-
-        return cm.connect()
-        .then(function(_) {
-            scannedTowers = BG9xCellInfo.scanCellTowers();
-            scannedTowers = (scannedTowers && scannedTowers.cellTowers.len() > 0) ? scannedTowers : null;
-            // Wait until the WiFi scanning is finished (if not yet)
-            return scanWifiPromise;
-        }.bindenv(this), function(_) {
-            throw "Couldn't connect to the server";
+        _updateAssistData()
+        .finally(function(_) {
+            ::debug("Writing the UTC time to u-blox..", "LocationDriver");
+            local ubxAssist = UBloxAssistNow(ubxDriver);
+            ubxAssist.writeUtcTimeAssist();
+            return _writeAssistDataToUBlox(ubxAssist);
         }.bindenv(this))
-        .then(function(_) {
-            local locationData = {};
+        .finally(function(_) {
+            ::debug("Getting location using GNSS (u-blox)..", "LocationDriver");
+            local onFix = function(location) {
+                ::info("Got location using GNSS", "LocationDriver");
+                ::debug(location, "LocationDriver");
 
-            if (scannedWifis && scannedTowers) {
-                locationData.wifiAccessPoints <- scannedWifis;
-                locationData.radioType <- scannedTowers.radioType;
-                locationData.cellTowers <- scannedTowers.cellTowers;
-                locType = "wifi+cell";
-            } else if (scannedWifis) {
-                locationData.wifiAccessPoints <- scannedWifis;
-                locType = "wifi";
-            } else if (scannedTowers) {
-                locationData.radioType <- scannedTowers.radioType;
-                locationData.cellTowers <- scannedTowers.cellTowers;
-                locType = "cell";
-            } else {
-                throw "No towers and WiFi scanned";
-            }
+                // Successful location!
+                esp.advDynamicData(location);
+            }.bindenv(this);
 
-            ::debug("Sending results to the agent..", "LocationDriver");
-
-            return _requestToAgent(APP_RM_MSG_NAME.LOCATION_CELL_WIFI, locationData)
-            .fail(function(err) {
-                throw "Error sending a request to the agent: " + err;
-            }.bindenv(this));
-        }.bindenv(this))
-        .then(function(resp) {
-            cm.keepConnection("LocationDriver", false);
-
-            if (resp == null) {
-                throw "No location received from the agent";
-            }
-
-            ::info("Got location using cell towers and/or WiFi", "LocationDriver");
-            ::debug(resp, "LocationDriver");
-
-            return {
-                // Here we assume that if the device is connected, its time is synced
-                "timestamp": time(),
-                "type": locType,
-                "accuracy": resp.accuracy,
-                "longitude": resp.location.lng,
-                "latitude": resp.location.lat
-            };
-        }.bindenv(this), function(err) {
-            cm.keepConnection("LocationDriver", false);
-            throw err;
-        }.bindenv(this));
-    }
-
-    /**
-     * Obtain the current location using BLE devices
-     *
-     * @return {Promise} that:
-     * - resolves with the current location if the operation succeeded
-     * - rejects with an error if the operation failed
-     */
-    function _getLocationBLEDevices() {
-        // Default accuracy
-        const LD_BLE_BEACON_DEFAULT_ACCURACY = 10;
-
-        if (!_bleDevicesEnabled) {
-            // Reject with null to indicate that the feature is disabled
-            return Promise.reject(null);
-        }
-
-        ::debug("Getting location using BLE devices..", "LocationDriver");
-
-        local knownGeneric = _knownBLEDevices.generic;
-        local knownIBeacons = _knownBLEDevices.iBeacon;
-
-        return esp.scanBLEAdverts()
-        .then(function(adverts) {
-            // Table of "recognized" advertisements (for which the location is known) and their locations
-            local recognized = {};
-
-            foreach (advert in adverts) {
-                if (advert.address in knownGeneric) {
-                    ::debug("A generic BLE device with known location found: " + advert.address, "LocationDriver");
-
-                    recognized[advert] <- knownGeneric[advert.address];
-                    continue;
-                }
-
-                local parsed = _parseIBeaconPacket(advert.advData);
-
-                if (parsed && parsed.uuid  in knownIBeacons
-                           && parsed.major in knownIBeacons[parsed.uuid]
-                           && parsed.minor in knownIBeacons[parsed.uuid][parsed.major]) {
-                    local iBeaconInfo = format("UUID %s, Major %s, Minor %s", parsed.uuid, parsed.major, parsed.minor);
-                    ::debug(format("An iBeacon device with known location found: %s, %s", advert.address, iBeaconInfo), "LocationDriver");
-
-                    recognized[advert] <- knownIBeacons[parsed.uuid][parsed.major][parsed.minor];
-                }
-            }
-
-            if (recognized.len() == 0) {
-                return Promise.reject("No known devices available");
-            }
-
-            local closestDevice = null;
-            foreach (advert, _ in recognized) {
-                if (closestDevice == null || closestDevice.rssi < advert.rssi) {
-                    closestDevice = advert;
-                }
-            }
-
-            ::info("Got location using BLE devices", "LocationDriver");
-            ::debug("The closest BLE device with known location: " + closestDevice.address, "LocationDriver");
-            ::debug(recognized[closestDevice], "LocationDriver");
-
-            return {
-                "timestamp": time(),
-                "type": "ble",
-                "accuracy": LD_BLE_BEACON_DEFAULT_ACCURACY,
-                "longitude": recognized[closestDevice].lng,
-                "latitude": recognized[closestDevice].lat
-            };
-        }.bindenv(this), function(err) {
-            throw "Couldn't scan BLE devices: " + err;
+            // Enable Position Velocity Time Solution messages
+            ubxDriver.enableUbxMsg(UBX_MSG_PARSER_CLASS_MSG_ID.NAV_PVT, LD_UBLOX_LOC_CHECK_PERIOD, _onUBloxNavMsgFunc(onFix));
         }.bindenv(this));
     }
 
@@ -6180,19 +5235,19 @@ class LocationDriver {
                 local headAcc = _getUBloxAccuracy(parsed.headAcc)
 
                 if (hAcc <= LD_GNSS_ACCURACY) {
-                    ::debug("velN: " + velN, "LocationDriver");
-                    ::debug("velE: " + velE, "LocationDriver");
-                    ::debug("velD: " + velD, "LocationDriver");
-                    ::debug("height: " + parsed.height, "LocationDriver");
-                    ::debug("gSpeed: " + parsed.gSpeed, "LocationDriver");
-                    ::debug("hMSL: " + parsed.hMSL, "LocationDriver");
-                    ::debug("headMot: " + parsed.headMot, "LocationDriver");
-                    ::debug("headVeh: " + parsed.headVeh, "LocationDriver");
-                    ::debug("hAcc: " + hAcc, "LocationDriver");
-                    ::debug("vAcc: " + vAcc, "LocationDriver");
-                    ::debug("tAcc: " + tAcc, "LocationDriver");
-                    ::debug("sAcc: " + sAcc, "LocationDriver");
-                    ::debug("headAcc: " + headAcc, "LocationDriver");
+                    // ::debug("velN: " + velN, "LocationDriver");
+                    // ::debug("velE: " + velE, "LocationDriver");
+                    // ::debug("velD: " + velD, "LocationDriver");
+                    // ::debug("height: " + parsed.height, "LocationDriver");
+                    // ::debug("gSpeed: " + parsed.gSpeed, "LocationDriver");
+                    // ::debug("hMSL: " + parsed.hMSL, "LocationDriver");
+                    // ::debug("headMot: " + parsed.headMot, "LocationDriver");
+                    // ::debug("headVeh: " + parsed.headVeh, "LocationDriver");
+                    // ::debug("hAcc: " + hAcc, "LocationDriver");
+                    // ::debug("vAcc: " + vAcc, "LocationDriver");
+                    // ::debug("tAcc: " + tAcc, "LocationDriver");
+                    // ::debug("sAcc: " + sAcc, "LocationDriver");
+                    // ::debug("headAcc: " + headAcc, "LocationDriver");
                     onFix({
                         // If we don't have the valid time, we take it from the location data
                         "timestamp": time() > LD_VALID_TS ? time() : _dateToTimestamp(parsed),
