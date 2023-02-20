@@ -56,6 +56,16 @@ const INIT_LATITUDE = 90.0;
 // Init longitude value (Greenwich)
 const INIT_LONGITUDE = 0.0;
 
+// Global values for Remote ID
+initGnssLat <- 0;
+initGnssLon <- 0;
+initGnssAlt <- 0;
+initGnssStartTime <- 0;
+// Meters above initial altitude to indicate drone is airborne
+const AIRBORNE_THRESHOLD = 2;
+// Seconds to try to acquire accurate initial coordinates
+const INIT_GNSS_FIX_TIME = 10;
+
 
 // Logger for "DEBUG", "INFO" and "ERROR" information.
 // Prints out information to the standard impcentral log ("server.log").
@@ -2296,7 +2306,7 @@ class ESP32Driver {
             _communicate(null, readyMsgValidator),
             _communicate(format("AT+CWMODE=%d", ESP32_WIFI_MODE.DISABLE), okValidator),
             _communicate(format("AT+BLEINIT=%d", ESP32_BLE_ROLE.SERVER), okValidator),
-            _communicate("AT+BLEADVPARAM=32,1600,3,0,7,0", okValidator),
+            _communicate("AT+BLEADVPARAM=32,400,3,0,7,0", okValidator),
             _communicate("AT+BLEADVSTART", okValidator)
         ];
 
@@ -2345,15 +2355,15 @@ class ESP32Driver {
             updateAdv(generateSystemMsg(
                 BLE_ADV_OP_LOC_SRC.TAKEOFF, // opLocSrc
                 BLE_ADV_UA_CLASS_TYPE.EUROPEAN_UNION, // uaClassType
-                0, // opLat
-                0, // opLon
+                initGnssLat, // opLat
+                initGnssLon, // opLon
                 1, // areaCount
                 0, // areaRadius
                 0, // areaCeiling
                 0, // areaFloor
                 BLE_ADV_UA_CLASS_1_CAT.OPEN, // uaClass1Cat
                 BLE_ADV_UA_CLASS_1_CLASS.CLASS_1, // uaClass1Class
-                0 // opAlt
+                initGnssAlt // opAlt
             )),
             updateAdv(generateOperatorIdMsg("FIN87astrdge12k8"))
         ];
@@ -2368,25 +2378,30 @@ class ESP32Driver {
     }
 
     function advDynamicData(location) {
-        if (_initialized) ::debug("Starting advDynamicData with location: " + location, "ESP32Driver");
+        if (_initialized) ::debug("Starting advDynamicData", "ESP32Driver");
         else ::debug("BLE not yet initialized, skipping advDynamicData", "ESP32Driver");
+
+        local opStatus = BLE_ADV_OP_STATUS.GROUND;
+        if (location.altitude - initGnssAlt > AIRBORNE_THRESHOLD) {
+            opStatus = BLE_ADV_OP_STATUS.AIRBORNE;
+        }
 
         // Functions that return promises which will be executed serially
         local promiseFuncs = [
             updateAdv(generateLocationVectorMsg(
-                BLE_ADV_OP_STATUS.AIRBORNE, // status
-                BLE_ADV_HEIGHT_TYPE.AGL, // heightType
+                opStatus, // status
+                BLE_ADV_HEIGHT_TYPE.ABOVE_TAKEOFF, // heightType
                 location.headingVehicle, // trackDir
                 location.groundSpeed, // speed
                 location.velocityVert, // vertSpeed
                 location.latitude, // lat
                 location.longitude, // lon
-                0, // pressAlt
+                0, // baroAlt
                 location.altitude, // geoAlt
-                location.altitude, // height
+                location.altitude - initGnssAlt, // height
                 getVertAcc(location.accVert), // vertAcc
                 getHorizAcc(location.accHoriz), // horizAcc
-                getVertAcc(location.accVert), // altAcc
+                BLE_ADV_VERT_ACC.GTE_150M_UNKNOWN, // baroAltAcc
                 getSpeedAcc(location.accSpeed) // spdAcc
             ))
         ];
@@ -2417,7 +2432,7 @@ class ESP32Driver {
 
     function generateLocationVectorMsg(
         status, heightType, trackDir, speed, vertSpeed, lat, lon,
-        pressAlt, geoAlt, height, vertAcc, horizAcc, altAcc, spdAcc
+        baroAlt, geoAlt, height, vertAcc, horizAcc, baroAltAcc, spdAcc
     ) {
         ::debug("generateLocationVectorMsg", "ESP32Driver");
         local flags = heightType << 2;
@@ -2440,15 +2455,15 @@ class ESP32Driver {
         local vertSpeedHex = integerToHexString((vertSpeed * 2).tointeger());
         local latHex = latLonToHex(lat);
         local lonHex = latLonToHex(lon);
-        local pressAltHex = altToHex(pressAlt);
+        local baroAltHex = altToHex(baroAlt);
         local geoAltHex= altToHex(geoAlt);
         local heightHex = altToHex(height);
         local timestampHex = getTenthsSecAfterHourHex();
         local timestampAccHex = integerToHexString(1, 1); // 1 = 0.1s (range: 0.1 - 1.5)
         return getPrefixHeader(BLE_ADV_MSG_TYPE.LOCATION_VECTOR) +
             status + flagsHex + trackDirHex + speedHex + vertSpeedHex +
-            latHex + lonHex + pressAltHex + geoAltHex + heightHex + vertAcc + horizAcc +
-            altAcc + spdAcc + timestampHex + "0" + timestampAccHex + "00";
+            latHex + lonHex + baroAltHex + geoAltHex + heightHex + vertAcc + horizAcc +
+            baroAltAcc + spdAcc + timestampHex + "0" + timestampAccHex + "00";
     }
 
     function generateAuthMsgPg0(
@@ -4990,14 +5005,13 @@ class LocationDriver {
 
                 local onFix = function(location) {
                     ::info("Got location using GNSS", "LocationDriver");
-                    ::debug(location, "LocationDriver");
+                    // ::debug(location, "LocationDriver");
 
                     // Successful location!
                     // Zero the fails counter, cancel the timeout timer, disable the u-blox, and resolve the promise
                     _gnssFailsCounter = 0;
                     imp.cancelwakeup(timeoutTimer);
                     // _disableUBlox();
-                    // esp.advDynamicData(location);
                     resolve(location);
                 }.bindenv(this);
 
@@ -5022,9 +5036,18 @@ class LocationDriver {
             ::debug("Getting location using GNSS (u-blox)..", "LocationDriver");
             local onFix = function(location) {
                 ::info("Got location using GNSS", "LocationDriver");
-                ::debug(location, "LocationDriver");
+                // ::debug(location, "LocationDriver");
 
                 // Successful location!
+                local time = time()
+                if (initGnssLat == 0 || initGnssLon == 0 || initGnssAlt == 0 || (time - initGnssStartTime) < (INIT_GNSS_FIX_TIME * 1000)) {
+                    if (initGnssStartTime == 0) {
+                        initGnssStartTime = time;
+                    }
+                    initGnssLat = location.latitude;
+                    initGnssLon = location.longitude;
+                    initGnssAlt = location.altitude;
+                }
                 esp.advDynamicData(location);
             }.bindenv(this);
 
