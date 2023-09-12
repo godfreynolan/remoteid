@@ -2320,6 +2320,11 @@ class ESP32Driver {
         }.bindenv(this));
     }
 
+    /**
+     * Creates and broadcasts the BLE advertisements for data that rarely changes.
+     * Called every 3 seconds according to spec.
+     * Most of the data would ultimately be set by the user.
+     */
     function advStaticData() {
         ::debug("Starting advStaticData", "ESP32Driver");
 
@@ -2377,6 +2382,9 @@ class ESP32Driver {
         }.bindenv(this));
     }
 
+    /**
+     * Creates and broadcasts BLE advertisement for telemetry data.
+     */
     function advDynamicData(location) {
         if (_initialized) ::debug("Starting advDynamicData", "ESP32Driver");
         else ::debug("BLE not yet initialized, skipping advDynamicData", "ESP32Driver");
@@ -2414,6 +2422,9 @@ class ESP32Driver {
         }.bindenv(this));
     }
 
+    /**
+     * Creates the BLE advertisement data that is prefixed to all messages.
+     */
     function getPrefixHeader(msgType, incCounter = true) {
         local msgCounter;
         if (incCounter) msgCounter = incMsgCounter(msgType);
@@ -2422,6 +2433,9 @@ class ESP32Driver {
         return BLE_ADV_DATA_PREFIX + msgCounterHex + msgType + BLE_ADV_PROTO_VER;
     }
 
+    /**
+     * Converts the given parameters into hex data for the Basic ID message according to spec.
+     */
     function generateBasicIdMsg(idType, uaType, idText) {
         ::debug("generateBasicIdMsg: " + idText, "ESP32Driver");
         if (idText.len() > 20) throw "Basic ID text must not exceed 20 characters";
@@ -2430,6 +2444,9 @@ class ESP32Driver {
             idType + uaType + idTextHex + "000000";
     }
 
+    /**
+     * Converts the given parameters into hex data for the Location Vector message according to spec.
+     */
     function generateLocationVectorMsg(
         status, heightType, trackDir, speed, vertSpeed, lat, lon,
         baroAlt, geoAlt, height, vertAcc, horizAcc, baroAltAcc, spdAcc
@@ -2466,6 +2483,9 @@ class ESP32Driver {
             baroAltAcc + spdAcc + timestampHex + "0" + timestampAccHex + "00";
     }
 
+    /**
+     * Converts the given parameters into hex data for the first page of the Auth message according to spec.
+     */
     function generateAuthMsgPg0(
         authType, lastPageIndex, dataLengthBytes, authData
     ) {
@@ -2479,6 +2499,9 @@ class ESP32Driver {
             dataLengthBytesHex + timestampHex + authData;
     }
 
+    /**
+     * Converts the given parameters into hex data for additional pages of the Auth message according to spec.
+     */
     function generateAuthMsg(authType, dataPage, authData) {
         ::debug("generateAuthMsg", "ESP32Driver");
         local dataPageHex = integerToHexString(dataPage, 1);
@@ -2486,6 +2509,9 @@ class ESP32Driver {
             authType + dataPageHex + authData;
     }
 
+    /**
+     * Converts the given parameters into hex data for the Self ID message according to spec.
+     */
     function generateSelfIdMsg(text) {
         ::debug("generateSelfIdMsg: " + text, "ESP32Driver");
         if (text.len() > 23) throw "Self ID text must not exceed 23 characters";
@@ -2493,6 +2519,9 @@ class ESP32Driver {
             BLE_ADV_SELF_ID_DESC_TYPE.TEXT + stringToHexString(text, 23);
     }
 
+    /**
+     * Converts the given parameters into hex data for System message according to spec.
+     */
     function generateSystemMsg(
         opLocSrcFlag, uaClassTypeFlag, opLat, opLon, areaCount, areaRadius,
         areaCeiling, areaFloor, uaClass1Cat, uaClass1Class, opAlt
@@ -2513,6 +2542,9 @@ class ESP32Driver {
             uaClass1Cat + uaClass1Class + altHex + timestampHex + "00";
     }
 
+    /**
+     * Converts the given parameters into hex data for the Operator ID message according to spec.
+     */
     function generateOperatorIdMsg(text) {
         ::debug("generateOperatorIdMsg: " + text, "ESP32Driver");
         if (text.len() > 20) throw "Operator ID text must not exceed 20 characters";
@@ -2521,6 +2553,9 @@ class ESP32Driver {
             stringToHexString(text, 20) + "000000";
     }
 
+    /**
+     * Returns the counter for the given message type.
+     */
     function getMsgCounter(type) {
         ::debug("getMsgCounter: " + type, "ESP32Driver");
         switch (type) {
@@ -2533,6 +2568,9 @@ class ESP32Driver {
         }
     }
 
+    /**
+     * Increments the counter for the given message type.
+     */
     function incMsgCounter(type) {
         switch (type) {
             case BLE_ADV_MSG_TYPE.BASIC_ID:
@@ -2550,29 +2588,47 @@ class ESP32Driver {
         }
     }
 
+    /**
+     * Increments an integer as an 8-bit value, looping 255 back to 0.
+     */
     function incAs8Bit(i) {
         if (i >= 0xFF) return 0;
         else return ++i;
     }
 
+    /**
+     * Converts a float value to a 32-bit hex string.
+     */
     function latLonToHex(latOrLon) {
         return int32ToLeHexString((latOrLon * math.pow(10,7)).tointeger());
     }
 
+    /**
+     * Converts a float value to a 16-bit hex string.
+     */
     function altToHex(alt) {
         return int16ToLeHexString(((alt + 1000) * 2).tointeger());
     }
 
+    /**
+     * Converts a Unix timestamp to a 32-bit hex string.
+     */
     function getRemoteIdTimeHex(unixTime = time()) {
         return int32ToLeHexString(unixTime - 1546300800);
     }
 
+    /**
+     * Gets the number of tenths of a second as a 16-bit hex string.
+     */
     function getTenthsSecAfterHourHex() {
         local date = date();
         local tenthsSec = date.min * 600 + date.sec * 10 + date.usec / 100;
         return int16ToLeHexString(tenthsSec);
     }
 
+    /**
+     * Converts horizontal accuracy in meters to an enum ordinal hex value according to spec.
+     */
     function getHorizAcc(accMeters) {
         if (accMeters < 1) return BLE_ADV_HORIZ_ACC.LT_1M;
         else if (accMeters < 3) return BLE_ADV_HORIZ_ACC.LT_3M;
@@ -2589,6 +2645,9 @@ class ESP32Driver {
         else return BLE_ADV_HORIZ_ACC.GTE_18520M_UNKNOWN;
     }
 
+    /**
+     * Converts vertical accuracy in meters to an enum ordinal hex value according to spec.
+     */
     function getVertAcc(accMeters) {
         if (accMeters < 1) return BLE_ADV_VERT_ACC.LT_1M;
         else if (accMeters < 3) return BLE_ADV_VERT_ACC.LT_3M;
@@ -2599,6 +2658,9 @@ class ESP32Driver {
         else return BLE_ADV_VERT_ACC.GTE_150M_UNKNOWN;
     }
 
+    /**
+     * Converts speed accuracy in meters/second to an enum ordinal hex value according to spec.
+     */
     function getSpeedAcc(accMetersSec) {
         if (accMetersSec < 0.3) return BLE_ADV_SPEED_ACC.LT_0D3MS;
         else if (accMetersSec < 1) return BLE_ADV_SPEED_ACC.LT_1MS;
@@ -2622,14 +2684,23 @@ class ESP32Driver {
         return format(fs, i).toupper();
     }
 
+    /**
+     *  Converts an integer to a 16-bit little-endian hex string.
+     */
     function int16ToLeHexString(i) {
         return integerToHexString(swap2(i), 4);
     }
 
+    /**
+     * Converts an integer to a 32-bit little-endian hex string.
+     */
     function int32ToLeHexString(i) {
         return integerToHexString(swap4(i), 8);
     }
 
+    /**
+     * Converts an integer to a 32-bit little-endian hex string.
+     */
     function stringToHexString(text, byteLength) {
         local dataBlob = blob(byteLength);
         dataBlob.writestring(text);
@@ -2656,6 +2727,9 @@ class ESP32Driver {
         return s.toupper();
     }
 
+    /**
+     * Sends the assembled BLE advertisement data (AT+BLEADVDATA) to the ESP32.
+     */
     function updateAdv(data, wrapInAFunc = true) {
         return _communicate("AT+BLEADVDATA=\"" + data + "\"", okValidator, null, wrapInAFunc);
     }
@@ -5021,6 +5095,9 @@ class LocationDriver {
         }.bindenv(this));
     }
 
+    /**
+     * Initializes the U-Blox module and starts polling GNSS for location.
+     */
     function _getLocationContinuous() {
         local ubxDriver = _initUblox();
         ::debug("Switched ON the u-blox module", "LocationDriver");
